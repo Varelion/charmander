@@ -27,7 +27,191 @@ const FALLBACK_FONT_PATHS: &[&str] = &[
 const MAX_RESULTS: usize = 200;
 const TYPE_DELAY: Duration = Duration::from_millis(150);
 
+const ICON_PNG: &[u8] = include_bytes!("../assets/icon.png");
+
+fn load_icon() -> egui::IconData {
+    let image = image::load_from_memory(ICON_PNG)
+        .expect("decode icon.png")
+        .into_rgba8();
+    let (width, height) = image.dimensions();
+    egui::IconData { rgba: image.into_raw(), width, height }
+}
+
+#[cfg(target_os = "linux")]
+const XFCE_SHORTCUT_PROPERTY: &str = "/commands/custom/<Primary><Shift>u";
+#[cfg(target_os = "linux")]
+const GNOME_KEYBINDING_PATH: &str =
+    "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/charmander/";
+#[cfg(target_os = "linux")]
+const GNOME_BINDING_SCHEMA: &str = "org.gnome.settings-daemon.plugins.media-keys.custom-keybinding";
+
+fn print_manual_instructions(exe: &str) {
+    println!("Bind Ctrl+Shift+U (or any key) to this command yourself:");
+    println!("  {exe}");
+}
+
+// `charmander --setup`: best-effort hotkey install, one code path per
+// platform/desktop. Where there's no scriptable keybinding API (KDE's is
+// version-fragile, macOS has none at all), we print instructions instead of
+// risking a broken config.
+fn run_setup() {
+    let exe = std::env::current_exe().expect("resolve own executable path");
+    let exe = exe.to_string_lossy().into_owned();
+
+    #[cfg(target_os = "windows")]
+    return setup_windows(&exe);
+
+    #[cfg(target_os = "macos")]
+    {
+        println!("Automatic setup isn't available on macOS.");
+        println!("Add it under System Settings > Keyboard > Keyboard Shortcuts > App Shortcuts:");
+        println!("  {exe}");
+        return;
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default().to_lowercase();
+        if desktop.contains("xfce") {
+            setup_xfce(&exe);
+        } else if desktop.contains("gnome") {
+            setup_gnome(&exe);
+        } else if desktop.contains("kde") {
+            println!("Automatic setup isn't supported on KDE yet (its shortcut config");
+            println!("differs too much across Plasma versions to script safely).");
+            println!("Add it under System Settings > Shortcuts > Custom Shortcuts:");
+            println!("  {exe}");
+        } else {
+            println!("Automatic setup isn't supported on this desktop environment.");
+            print_manual_instructions(&exe);
+        }
+        return;
+    }
+
+    #[allow(unreachable_code)]
+    {
+        println!("Automatic setup isn't supported on this platform.");
+        print_manual_instructions(&exe);
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn setup_xfce(exe: &str) {
+    let property_exists = std::process::Command::new("xfconf-query")
+        .args(["-c", "xfce4-keyboard-shortcuts", "-p", XFCE_SHORTCUT_PROPERTY])
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false);
+
+    let mut cmd = std::process::Command::new("xfconf-query");
+    cmd.args(["-c", "xfce4-keyboard-shortcuts", "-p", XFCE_SHORTCUT_PROPERTY]);
+    if property_exists {
+        cmd.args(["-s", exe]);
+    } else {
+        cmd.args(["-n", "-t", "string", "-s", exe]);
+    }
+
+    match cmd.status() {
+        Ok(status) if status.success() => println!("Bound Ctrl+Shift+U to charmander."),
+        _ => {
+            println!("Failed to set the XFCE shortcut.");
+            print_manual_instructions(exe);
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn gsettings_get(schema: &str, key: &str) -> Option<String> {
+    let output = std::process::Command::new("gsettings").args(["get", schema, key]).output().ok()?;
+    output.status.success().then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+#[cfg(target_os = "linux")]
+fn gsettings_set(schema: &str, key: &str, value: &str) -> bool {
+    std::process::Command::new("gsettings")
+        .args(["set", schema, key, value])
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+// GNOME custom keybindings live in a gsettings array of dconf paths; each
+// path then holds its own name/command/binding under a child schema.
+#[cfg(target_os = "linux")]
+fn setup_gnome(exe: &str) {
+    const LIST_SCHEMA: &str = "org.gnome.settings-daemon.plugins.media-keys";
+    const LIST_KEY: &str = "custom-keybindings";
+
+    let existing = gsettings_get(LIST_SCHEMA, LIST_KEY).unwrap_or_default();
+    let mut paths: Vec<String> = existing
+        .trim_start_matches("@as")
+        .trim()
+        .trim_matches(|c| c == '[' || c == ']')
+        .split(',')
+        .map(|entry| entry.trim().trim_matches('\'').to_string())
+        .filter(|entry| !entry.is_empty())
+        .collect();
+
+    if !paths.iter().any(|path| path == GNOME_KEYBINDING_PATH) {
+        paths.push(GNOME_KEYBINDING_PATH.to_string());
+    }
+
+    let list_literal = format!(
+        "[{}]",
+        paths.iter().map(|path| format!("'{path}'")).collect::<Vec<_>>().join(", ")
+    );
+
+    let binding_schema = format!("{GNOME_BINDING_SCHEMA}:{GNOME_KEYBINDING_PATH}");
+    let ok = gsettings_set(LIST_SCHEMA, LIST_KEY, &list_literal)
+        && gsettings_set(&binding_schema, "name", "'charmander'")
+        && gsettings_set(&binding_schema, "command", &format!("'{exe}'"))
+        && gsettings_set(&binding_schema, "binding", "'<Primary><Shift>u'");
+
+    if ok {
+        println!("Bound Ctrl+Shift+U to charmander.");
+    } else {
+        println!("Failed to set the GNOME shortcut (is gsettings installed?).");
+        print_manual_instructions(exe);
+    }
+}
+
+// Windows hotkeys are set on a Start Menu shortcut's embedded "hotkey" field;
+// Windows registers it globally as long as the .lnk lives in the Start Menu.
+#[cfg(target_os = "windows")]
+fn setup_windows(exe: &str) {
+    use mslnk::{HotkeyKey, HotkeyModifiers, ShellLink};
+
+    let Ok(appdata) = std::env::var("APPDATA") else {
+        println!("Couldn't resolve %APPDATA%.");
+        return print_manual_instructions(exe);
+    };
+    let shortcut_path =
+        std::path::Path::new(&appdata).join("Microsoft/Windows/Start Menu/Programs/charmander.lnk");
+
+    let Ok(mut link) = ShellLink::new(exe) else {
+        println!("Failed to build the shortcut.");
+        return print_manual_instructions(exe);
+    };
+
+    let hotkey = link.header_mut().hotkey_mut();
+    hotkey.set_key(HotkeyKey::KeyU);
+    hotkey.set_modifiers(HotkeyModifiers::HOTKEYF_CONTROL | HotkeyModifiers::HOTKEYF_SHIFT);
+
+    match link.create_lnk(&shortcut_path) {
+        Ok(()) => println!("Bound Ctrl+Shift+U to charmander."),
+        Err(_) => {
+            println!("Failed to write the Start Menu shortcut.");
+            print_manual_instructions(exe);
+        }
+    }
+}
+
 fn main() -> eframe::Result<()> {
+    if std::env::args().any(|arg| arg == "--setup") {
+        run_setup();
+        return Ok(());
+    }
+
     let chosen: Arc<Mutex<Option<char>>> = Arc::new(Mutex::new(None));
     let chosen_for_app = chosen.clone();
 
@@ -37,7 +221,9 @@ fn main() -> eframe::Result<()> {
             .with_min_inner_size([320.0, 260.0])
             .with_decorations(false)
             .with_always_on_top()
-            .with_resizable(true),
+            .with_active(true)
+            .with_resizable(true)
+            .with_icon(load_icon()),
         ..Default::default()
     };
 
@@ -225,6 +411,7 @@ struct Picker {
     chosen: Arc<Mutex<Option<char>>>,
     alt_buffer: String,
     alt_held_prev: bool,
+    ever_focused: bool,
 }
 
 impl Picker {
@@ -239,6 +426,7 @@ impl Picker {
             chosen,
             alt_buffer: String::new(),
             alt_held_prev: false,
+            ever_focused: false,
         };
         picker.refresh_results();
         picker
@@ -333,6 +521,16 @@ impl eframe::App for Picker {
         self.handle_alt_code(ctx);
         if ctx.input(|i| i.key_pressed(Key::Escape)) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+        // Lost window focus (alt-tab, click elsewhere, switch workspace): close.
+        // `ever_focused` guards against the brief unfocused state some window
+        // managers report on the very first frame, before focus is granted.
+        match ctx.input(|i| i.viewport().focused) {
+            Some(true) => self.ever_focused = true,
+            Some(false) if self.ever_focused => {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            _ => {}
         }
         if ctx.input(|i| i.key_pressed(Key::ArrowDown)) {
             self.selected = (self.selected + 1).min(self.results.len().saturating_sub(1));

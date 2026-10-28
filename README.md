@@ -1,5 +1,7 @@
 # charmander
 
+<img src="assets/icon.png" width="64" height="64" alt="charmander icon">
+
 A hotkey-driven Unicode character picker. Hit a shortcut, search, pick a
 character, it gets typed into whatever window had focus — editor, terminal,
 Discord client, anywhere.
@@ -35,13 +37,20 @@ fallback fonts above are optional but recommended — on Debian/Ubuntu:
 
 ## Usage
 
-Bind it to a global hotkey in your desktop environment (XFCE example):
-
 ```sh
-xfconf-query -c xfce4-keyboard-shortcuts \
-  -p "/commands/custom/<Primary><Shift>u" \
-  -n -t string -s "$(which charmander)"
+charmander --setup
 ```
+
+Binds `Ctrl+Shift+U` to charmander automatically on:
+
+- **XFCE** — via `xfconf-query`
+- **GNOME** — via `gsettings` custom keybindings
+- **Windows** — embeds the hotkey in a Start Menu shortcut (the native
+  mechanism Windows uses for global shortcuts)
+
+Elsewhere (KDE, macOS, anything else) `--setup` prints the command to bind
+manually, since those don't have a keybinding API that's safe to script
+blindly.
 
 Then press the hotkey anywhere, search, and hit `Enter`.
 

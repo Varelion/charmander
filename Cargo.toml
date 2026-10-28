@@ -2,6 +2,14 @@
 name = "charmander"
 version = "0.1.0"
 edition = "2024"
+description = "A hotkey-driven Unicode character picker with favorites and Windows-style Alt codes"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Varelion/charmander"
+readme = "README.md"
+keywords = ["unicode", "emoji", "picker", "hotkey", "character"]
+categories = ["command-line-utilities"]
 
 [dependencies]
+eframe = "0.37.0"
+egui = "0.37.0"
 enigo = "0.6.1"

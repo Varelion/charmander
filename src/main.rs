@@ -10,22 +10,382 @@ use enigo::{Enigo, Keyboard, Settings};
 
 include!(concat!(env!("OUT_DIR"), "/characters.rs"));
 
-// Colors and font mirrored from ~/.config/alacritty/alacritty.toml
-// so the picker blends into the user's terminal.
-const BG: Color32 = Color32::from_rgb(0x12, 0x08, 0x1a);
-const FG: Color32 = Color32::from_rgb(0xff, 0xa0, 0x4d);
-const ACCENT: Color32 = Color32::from_rgb(0xff, 0x75, 0x18);
-const DIM: Color32 = Color32::from_rgb(0x4a, 0x3b, 0x52);
-
-const FONT_PATH: &str = "/home/z/.local/share/fonts/FiraCodeNerdFontMono-Regular.ttf";
-// Fallback fonts so emoji/symbol codepoints render as a glyph instead of a blank box.
-const FALLBACK_FONT_PATHS: &[&str] = &[
-    "/usr/share/fonts/truetype/ancient-scripts/Symbola_hint.ttf",
-    "/usr/share/fonts/truetype/noto/NotoSansSymbols2-Regular.ttf",
-    "/usr/share/fonts/truetype/noto/NotoSansSymbols-Regular.ttf",
-];
+// Fallback font families, resolved through fontconfig, so emoji/symbol
+// codepoints render as a glyph instead of a blank box.
+const FALLBACK_FONT_FAMILIES: &[&str] =
+    &["Symbola", "Noto Sans Symbols2", "Noto Sans Symbols", "Noto Color Emoji"];
 const MAX_RESULTS: usize = 200;
 const TYPE_DELAY: Duration = Duration::from_millis(150);
+
+// Look of the picker. Loaded once at startup, in priority order:
+//   1. ~/.config/charmander/theme.conf   (user override, always wins)
+//   2. ~/.config/alacritty/alacritty.toml (auto-detected from the terminal)
+//   3. the built-in defaults below
+#[derive(Clone)]
+struct Theme {
+    bg: Color32,
+    fg: Color32,
+    accent: Color32,
+    dim: Color32,
+    font_family: String,
+}
+
+impl Default for Theme {
+    fn default() -> Self {
+        Self {
+            bg: Color32::from_rgb(0x12, 0x08, 0x1a),
+            fg: Color32::from_rgb(0xff, 0xa0, 0x4d),
+            accent: Color32::from_rgb(0xff, 0x75, 0x18),
+            dim: Color32::from_rgb(0x4a, 0x3b, 0x52),
+            font_family: "monospace".to_owned(),
+        }
+    }
+}
+
+fn config_dir() -> PathBuf {
+    home_config("charmander")
+}
+
+// Config root per platform: XDG_CONFIG_HOME or ~/.config on unix, %APPDATA%
+// on Windows (where HOME is normally unset). Never panics - every caller
+// treats missing config files as "use defaults".
+fn config_root() -> PathBuf {
+    let non_empty = |key| std::env::var(key).ok().filter(|value| !value.is_empty());
+
+    if let Some(xdg) = non_empty("XDG_CONFIG_HOME") {
+        return PathBuf::from(xdg);
+    }
+    if let Some(appdata) = non_empty("APPDATA") {
+        return PathBuf::from(appdata);
+    }
+    let home = non_empty("HOME").or_else(|| non_empty("USERPROFILE")).unwrap_or_default();
+    PathBuf::from(home).join(".config")
+}
+
+fn home_config(relative: &str) -> PathBuf {
+    config_root().join(relative)
+}
+
+// Accepts the forms terminal configs actually use: #rrggbb, rrggbb,
+// and GNOME's rgb(r,g,b).
+fn parse_hex_color(value: &str) -> Option<Color32> {
+    let value = strip_value(value);
+
+    if let Some(channels) = value.strip_prefix("rgb(").and_then(|rest| rest.strip_suffix(')')) {
+        let mut parts = channels.split(',').map(|part| part.trim().parse::<u8>().ok());
+        return Some(Color32::from_rgb(parts.next()??, parts.next()??, parts.next()??));
+    }
+
+    let hex = value.trim_start_matches('#');
+    if hex.len() != 6 {
+        return None;
+    }
+    let channel = |range: std::ops::Range<usize>| u8::from_str_radix(&hex[range], 16).ok();
+    Some(Color32::from_rgb(channel(0..2)?, channel(2..4)?, channel(4..6)?))
+}
+
+// Terminal font settings often carry a point size ("Fira Code 11"); egui
+// wants the family alone.
+fn strip_font_size(family: &str) -> String {
+    let family = strip_value(family);
+    match family.rsplit_once(' ') {
+        Some((head, tail)) if tail.parse::<f32>().is_ok() => head.to_owned(),
+        _ => family.to_owned(),
+    }
+}
+
+// Picks the 9th entry (bright black) out of a delimited palette list.
+fn palette_bright_black(list: &str, delimiter: char) -> Option<Color32> {
+    list.trim_matches(|c| c == '[' || c == ']')
+        .split(delimiter)
+        .nth(8)
+        .and_then(parse_hex_color)
+}
+
+fn strip_value(value: &str) -> &str {
+    value.trim().trim_matches('"').trim_matches('\'')
+}
+
+// theme.conf is a flat `key = value` file; anything missing keeps its
+// previous value, so a partial override is fine.
+fn apply_theme_conf(content: &str, theme: &mut Theme) {
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        match key.trim() {
+            "background" => theme.bg = parse_hex_color(value).unwrap_or(theme.bg),
+            "foreground" => theme.fg = parse_hex_color(value).unwrap_or(theme.fg),
+            "accent" => theme.accent = parse_hex_color(value).unwrap_or(theme.accent),
+            "dim" => theme.dim = parse_hex_color(value).unwrap_or(theme.dim),
+            "font_family" => theme.font_family = strip_value(value).to_owned(),
+            _ => {}
+        }
+    }
+}
+
+// Theme sources, keyed by the terminal's binary name so the user's default
+// terminal can be tried first. Each parser returns None when its config is
+// absent or has nothing we recognize.
+type ThemeParser = fn() -> Option<Theme>;
+
+const THEME_SOURCES: &[(&str, ThemeParser)] = &[
+    ("alacritty", theme_from_alacritty),
+    ("kitty", theme_from_kitty),
+    ("xfce4-terminal", theme_from_xfce4_terminal),
+    ("gnome-terminal", theme_from_gnome_terminal),
+];
+
+// Note on `dim`: every parser takes *bright* black (palette index 8), not
+// normal black, which is usually too close to the background for the badge
+// fills to be visible against it.
+
+// Section-aware line scan of alacritty.toml rather than a full TOML parse:
+// the handful of keys we want are all flat strings.
+fn theme_from_alacritty() -> Option<Theme> {
+    let content = fs::read_to_string(home_config("alacritty/alacritty.toml")).ok()?;
+
+    let mut theme = Theme::default();
+    let mut section = String::new();
+    let mut matched = false;
+
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        if let Some(header) = line.strip_prefix('[').and_then(|rest| rest.strip_suffix(']')) {
+            section = header.to_owned();
+            continue;
+        }
+
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+
+        let slot = match (section.as_str(), key.trim()) {
+            ("colors.primary", "background") => &mut theme.bg,
+            ("colors.primary", "foreground") => &mut theme.fg,
+            ("colors.cursor", "cursor") => &mut theme.accent,
+            ("colors.bright", "black") => &mut theme.dim,
+            ("font.normal", "family") => {
+                theme.font_family = strip_value(value).to_owned();
+                matched = true;
+                continue;
+            }
+            _ => continue,
+        };
+
+        if let Some(color) = parse_hex_color(value) {
+            *slot = color;
+            matched = true;
+        }
+    }
+
+    matched.then_some(theme)
+}
+
+// kitty.conf is flat and space-separated: `foreground #ffa04d`.
+fn theme_from_kitty() -> Option<Theme> {
+    let content = fs::read_to_string(home_config("kitty/kitty.conf")).ok()?;
+
+    let mut theme = Theme::default();
+    let mut matched = false;
+
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        let Some((key, value)) = line.split_once(char::is_whitespace) else {
+            continue;
+        };
+
+        let slot = match key {
+            "background" => &mut theme.bg,
+            "foreground" => &mut theme.fg,
+            "cursor" => &mut theme.accent,
+            "color8" => &mut theme.dim,
+            "font_family" => {
+                theme.font_family = strip_value(value).to_owned();
+                matched = true;
+                continue;
+            }
+            _ => continue,
+        };
+
+        if let Some(color) = parse_hex_color(value) {
+            *slot = color;
+            matched = true;
+        }
+    }
+
+    matched.then_some(theme)
+}
+
+// terminalrc is INI-style, with the 16 palette entries in one
+// semicolon-separated ColorPalette value.
+fn theme_from_xfce4_terminal() -> Option<Theme> {
+    let content = fs::read_to_string(home_config("xfce4/terminal/terminalrc")).ok()?;
+
+    let mut theme = Theme::default();
+    let mut matched = false;
+
+    for line in content.lines() {
+        let Some((key, value)) = line.trim().split_once('=') else {
+            continue;
+        };
+
+        let color = match key {
+            "ColorBackground" => parse_hex_color(value).map(|c| (c, &mut theme.bg)),
+            "ColorForeground" => parse_hex_color(value).map(|c| (c, &mut theme.fg)),
+            "ColorCursor" => parse_hex_color(value).map(|c| (c, &mut theme.accent)),
+            "ColorPalette" => palette_bright_black(value, ';').map(|c| (c, &mut theme.dim)),
+            "FontName" => {
+                theme.font_family = strip_font_size(value);
+                matched = true;
+                continue;
+            }
+            _ => continue,
+        };
+
+        if let Some((color, slot)) = color {
+            *slot = color;
+            matched = true;
+        }
+    }
+
+    matched.then_some(theme)
+}
+
+fn gsettings_profile_get(profile_schema: &str, key: &str) -> Option<String> {
+    let output = std::process::Command::new("gsettings")
+        .args(["get", profile_schema, key])
+        .output()
+        .ok()?;
+    output.status.success().then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+// GNOME Terminal keeps its colors in dconf, under a per-profile UUID.
+fn theme_from_gnome_terminal() -> Option<Theme> {
+    let uuid_raw = gsettings_profile_get("org.gnome.Terminal.ProfilesList", "default")?;
+    let uuid = strip_value(&uuid_raw);
+    if uuid.is_empty() {
+        return None;
+    }
+    let schema = format!(
+        "org.gnome.Terminal.Legacy.Profile:/org/gnome/terminal/legacy/profiles:/:{uuid}/"
+    );
+
+    let mut theme = Theme::default();
+    let mut matched = false;
+
+    let mut take = |key: &str, slot: &mut Color32| {
+        if let Some(color) = gsettings_profile_get(&schema, key).as_deref().and_then(parse_hex_color)
+        {
+            *slot = color;
+            matched = true;
+        }
+    };
+    take("background-color", &mut theme.bg);
+    take("foreground-color", &mut theme.fg);
+    take("cursor-background-color", &mut theme.accent);
+
+    if let Some(palette) = gsettings_profile_get(&schema, "palette")
+        && let Some(color) = palette_bright_black(&palette, ',')
+    {
+        theme.dim = color;
+        matched = true;
+    }
+
+    if let Some(font) = gsettings_profile_get(&schema, "font") {
+        theme.font_family = strip_font_size(&font);
+        matched = true;
+    }
+
+    matched.then_some(theme)
+}
+
+// The user's default terminal, so its config wins over any other terminal
+// config that happens to be lying around on the system.
+fn default_terminal_hint() -> Option<String> {
+    if let Ok(terminal) = std::env::var("TERMINAL")
+        && !terminal.is_empty()
+    {
+        return Some(terminal.to_lowercase());
+    }
+
+    // XFCE records its preferred terminal here.
+    if let Ok(content) = fs::read_to_string(home_config("xfce4/helpers.rc"))
+        && let Some(value) =
+            content.lines().find_map(|line| line.trim().strip_prefix("TerminalEmulator="))
+    {
+        return Some(value.trim().to_lowercase());
+    }
+
+    // Debian/Ubuntu record the system-wide choice as an alternatives symlink.
+    fs::read_link("/etc/alternatives/x-terminal-emulator")
+        .ok()?
+        .file_name()
+        .map(|name| name.to_string_lossy().to_lowercase())
+}
+
+fn detect_theme() -> Option<Theme> {
+    let hint = default_terminal_hint().unwrap_or_default();
+
+    let preferred = THEME_SOURCES
+        .iter()
+        .find(|(name, _)| hint.contains(name))
+        .and_then(|(_, parse)| parse());
+
+    preferred.or_else(|| THEME_SOURCES.iter().find_map(|(_, parse)| parse()))
+}
+
+// Leaves a commented template behind on first run, so there's always a file
+// to edit even when auto-detection worked.
+fn write_theme_conf_template(theme: &Theme) {
+    let path = config_dir().join("theme.conf");
+    if path.exists() {
+        return;
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).ok();
+    }
+
+    let hex = |color: Color32| format!("#{:02x}{:02x}{:02x}", color.r(), color.g(), color.b());
+    let template = format!(
+        "# charmander theme. Uncomment a line to override the auto-detected value.\n\
+         # Values below are what charmander is currently using.\n\
+         #background = \"{}\"\n\
+         #foreground = \"{}\"\n\
+         #accent = \"{}\"\n\
+         #dim = \"{}\"\n\
+         #font_family = \"{}\"\n",
+        hex(theme.bg),
+        hex(theme.fg),
+        hex(theme.accent),
+        hex(theme.dim),
+        theme.font_family,
+    );
+    fs::write(path, template).ok();
+}
+
+fn load_theme() -> Theme {
+    let detected = detect_theme().unwrap_or_default();
+    write_theme_conf_template(&detected);
+
+    let mut theme = detected;
+    if let Ok(content) = fs::read_to_string(config_dir().join("theme.conf")) {
+        apply_theme_conf(&content, &mut theme);
+    }
+    theme
+}
 
 const ICON_PNG: &[u8] = include_bytes!("../assets/icon.png");
 
@@ -214,6 +574,7 @@ fn main() -> eframe::Result<()> {
 
     let chosen: Arc<Mutex<Option<char>>> = Arc::new(Mutex::new(None));
     let chosen_for_app = chosen.clone();
+    let theme = load_theme();
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -231,9 +592,9 @@ fn main() -> eframe::Result<()> {
         "charmander",
         options,
         Box::new(move |cc| {
-            setup_fonts(&cc.egui_ctx);
-            setup_style(&cc.egui_ctx);
-            Ok(Box::new(Picker::new(chosen_for_app)))
+            setup_fonts(&cc.egui_ctx, &theme);
+            setup_style(&cc.egui_ctx, &theme);
+            Ok(Box::new(Picker::new(chosen_for_app, theme)))
         }),
     )?;
 
@@ -244,63 +605,64 @@ fn main() -> eframe::Result<()> {
     Ok(())
 }
 
-fn setup_fonts(ctx: &egui::Context) {
-    let Ok(bytes) = fs::read(FONT_PATH) else {
-        return;
+// Asks fontconfig for the file backing a family name, so we never hardcode
+// font paths (they differ per distro, and don't exist at all elsewhere).
+fn resolve_font(family: &str) -> Option<Vec<u8>> {
+    let output = std::process::Command::new("fc-match")
+        .args([&format!("{family}:style=Regular"), "--format=%{file}"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let path = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    fs::read(path).ok()
+}
+
+fn setup_fonts(ctx: &egui::Context, theme: &Theme) {
+    let mut fonts = FontDefinitions::default();
+    let mut register = |name: String, bytes: Vec<u8>, first: bool| {
+        fonts.font_data.insert(name.clone(), FontData::from_owned(bytes).into());
+        for family in [FontFamily::Proportional, FontFamily::Monospace] {
+            let list = fonts.families.get_mut(&family).unwrap();
+            if first {
+                list.insert(0, name.clone());
+            } else {
+                list.push(name.clone());
+            }
+        }
     };
 
-    let mut fonts = FontDefinitions::default();
-    fonts
-        .font_data
-        .insert("firacode".to_owned(), FontData::from_owned(bytes).into());
-    fonts
-        .families
-        .get_mut(&FontFamily::Proportional)
-        .unwrap()
-        .insert(0, "firacode".to_owned());
-    fonts
-        .families
-        .get_mut(&FontFamily::Monospace)
-        .unwrap()
-        .insert(0, "firacode".to_owned());
+    if let Some(bytes) = resolve_font(&theme.font_family) {
+        register("primary".to_owned(), bytes, true);
+    }
 
-    for (idx, path) in FALLBACK_FONT_PATHS.iter().enumerate() {
-        let Ok(bytes) = fs::read(path) else { continue };
-        let name = format!("fallback{idx}");
-        fonts.font_data.insert(name.clone(), FontData::from_owned(bytes).into());
-        fonts
-            .families
-            .get_mut(&FontFamily::Proportional)
-            .unwrap()
-            .push(name.clone());
-        fonts
-            .families
-            .get_mut(&FontFamily::Monospace)
-            .unwrap()
-            .push(name);
+    for (idx, family) in FALLBACK_FONT_FAMILIES.iter().enumerate() {
+        if let Some(bytes) = resolve_font(family) {
+            register(format!("fallback{idx}"), bytes, false);
+        }
     }
 
     ctx.set_fonts(fonts);
 }
 
-fn setup_style(ctx: &egui::Context) {
+fn setup_style(ctx: &egui::Context, theme: &Theme) {
     let mut visuals = egui::Visuals::dark();
-    visuals.override_text_color = Some(FG);
-    visuals.window_fill = BG;
-    visuals.panel_fill = BG;
-    visuals.extreme_bg_color = BG;
-    visuals.faint_bg_color = BG;
-    visuals.selection.bg_fill = ACCENT;
+    visuals.override_text_color = Some(theme.fg);
+    visuals.window_fill = theme.bg;
+    visuals.panel_fill = theme.bg;
+    visuals.extreme_bg_color = theme.bg;
+    visuals.faint_bg_color = theme.bg;
+    visuals.selection.bg_fill = theme.accent;
     visuals.selection.stroke.color = Color32::BLACK;
-    visuals.widgets.inactive.bg_fill = BG;
-    visuals.widgets.hovered.bg_fill = DIM;
-    visuals.widgets.active.bg_fill = ACCENT;
+    visuals.widgets.inactive.bg_fill = theme.bg;
+    visuals.widgets.hovered.bg_fill = theme.dim;
+    visuals.widgets.active.bg_fill = theme.accent;
     ctx.set_visuals(visuals);
 }
 
 fn favorites_path() -> PathBuf {
-    let home = std::env::var("HOME").expect("HOME not set");
-    PathBuf::from(home).join(".config/charmander/favorites.txt")
+    config_dir().join("favorites.txt")
 }
 
 fn load_favorites() -> HashSet<u32> {
@@ -323,8 +685,7 @@ fn save_favorites(favorites: &HashSet<u32>) {
 }
 
 fn default_view_path() -> PathBuf {
-    let home = std::env::var("HOME").expect("HOME not set");
-    PathBuf::from(home).join(".config/charmander/default_view.txt")
+    config_dir().join("default_view.txt")
 }
 
 fn load_default_view_is_favorites() -> bool {
@@ -343,16 +704,16 @@ fn save_default_view(favorites_only: bool) {
 }
 
 // Draws a terminal-keycap-style badge, e.g. [Ctrl+F] favorite
-fn key_badge(ui: &mut egui::Ui, key: &str, action: &str) {
+fn key_badge(ui: &mut egui::Ui, theme: &Theme, key: &str, action: &str) {
     egui::Frame::new()
-        .fill(DIM)
-        .stroke(egui::Stroke::new(1.0, ACCENT))
+        .fill(theme.dim)
+        .stroke(egui::Stroke::new(1.0, theme.accent))
         .corner_radius(4)
         .inner_margin(egui::Margin::symmetric(6, 2))
         .show(ui, |ui| {
-            ui.label(RichText::new(key).color(ACCENT).strong().monospace());
+            ui.label(RichText::new(key).color(theme.accent).strong().monospace());
         });
-    ui.label(RichText::new(action).color(FG).small());
+    ui.label(RichText::new(action).color(theme.fg).small());
 }
 
 // Windows "Alt code" entry: hold Alt, type decimal digits, release Alt.
@@ -412,10 +773,11 @@ struct Picker {
     alt_buffer: String,
     alt_held_prev: bool,
     ever_focused: bool,
+    theme: Theme,
 }
 
 impl Picker {
-    fn new(chosen: Arc<Mutex<Option<char>>>) -> Self {
+    fn new(chosen: Arc<Mutex<Option<char>>>, theme: Theme) -> Self {
         let mut picker = Self {
             query: String::new(),
             favorites: load_favorites(),
@@ -427,6 +789,7 @@ impl Picker {
             alt_buffer: String::new(),
             alt_held_prev: false,
             ever_focused: false,
+            theme,
         };
         picker.refresh_results();
         picker
@@ -538,10 +901,10 @@ impl eframe::App for Picker {
         if ctx.input(|i| i.key_pressed(Key::ArrowUp)) {
             self.selected = self.selected.saturating_sub(1);
         }
-        if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(Key::F)) {
-            if let Some((codepoint, _)) = self.results.get(self.selected).copied() {
-                self.toggle_favorite(codepoint);
-            }
+        if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(Key::F))
+            && let Some((codepoint, _)) = self.results.get(self.selected).copied()
+        {
+            self.toggle_favorite(codepoint);
         }
         if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(Key::Num1)) {
             self.favorites_only = false;
@@ -554,39 +917,38 @@ impl eframe::App for Picker {
         if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(Key::D)) {
             save_default_view(self.favorites_only);
         }
-        if ctx.input(|i| i.key_pressed(Key::Enter)) {
-            if let Some((codepoint, _)) = self.results.get(self.selected).copied() {
-                self.choose(codepoint, ctx);
-            }
+        if ctx.input(|i| i.key_pressed(Key::Enter))
+            && let Some((codepoint, _)) = self.results.get(self.selected).copied()
+        {
+            self.choose(codepoint, ctx);
         }
 
+        let theme = self.theme.clone();
         egui::Panel::bottom("legend").show(ui, |ui| {
             ui.add_space(4.0);
             ui.horizontal_wrapped(|ui| {
-                key_badge(ui, "Enter", "insert");
-                key_badge(ui, "\u{2191}\u{2193}", "navigate");
-                key_badge(ui, "Ctrl+F", "favorite");
-                key_badge(ui, "Right-click", "favorite");
-                key_badge(ui, "Alt+digits", "alt code");
-                key_badge(ui, "Ctrl+1 / Ctrl+2", "switch view");
-                key_badge(ui, "Ctrl+D", "set default view");
-                key_badge(ui, "Esc", "cancel");
+                key_badge(ui, &theme, "\u{2191}\u{2193}", "navigate");
+                key_badge(ui, &theme, "Enter", "insert");
+                key_badge(ui, &theme, "Right-click", "favorite");
+                key_badge(ui, &theme, "Alt+digits", "alt code");
+            });
+            ui.horizontal_wrapped(|ui| {
+                key_badge(ui, &theme, "Ctrl+F", "favorite");
+                key_badge(ui, &theme, "Ctrl+1 / Ctrl+2", "switch view");
+                key_badge(ui, &theme, "Ctrl+D", "set default view");
             });
             ui.add_space(4.0);
         });
 
         egui::CentralPanel::default().show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
-                ui.label(RichText::new("charmander").color(FG).strong());
+                ui.label(RichText::new("charmander").color(theme.fg).strong());
                 ui.separator();
-                if ui.selectable_label(!self.favorites_only, "All (Ctrl+1)").clicked() {
+                if ui.selectable_label(!self.favorites_only, "All").clicked() {
                     self.favorites_only = false;
                     self.refresh_results();
                 }
-                if ui
-                    .selectable_label(self.favorites_only, "★ Favorites (Ctrl+2)")
-                    .clicked()
-                {
+                if ui.selectable_label(self.favorites_only, "★ Favorites").clicked() {
                     self.favorites_only = true;
                     self.refresh_results();
                 }
@@ -598,7 +960,7 @@ impl eframe::App for Picker {
                 // search box, so TextEdit never steals the digit key events.
                 ui.label(
                     RichText::new(format!("Alt code: {}_", self.alt_buffer))
-                        .color(ACCENT)
+                        .color(theme.accent)
                         .monospace(),
                 );
             } else {
@@ -624,11 +986,11 @@ impl eframe::App for Picker {
                     let text = format!("{glyph}  {name}  (U+{codepoint:04X})  {star}");
 
                     let rich = if is_selected {
-                        RichText::new(text).color(Color32::BLACK).background_color(ACCENT)
+                        RichText::new(text).color(Color32::BLACK).background_color(theme.accent)
                     } else if is_favorite {
-                        RichText::new(text).color(ACCENT)
+                        RichText::new(text).color(theme.accent)
                     } else {
-                        RichText::new(text).color(FG)
+                        RichText::new(text).color(theme.fg)
                     };
 
                     let response = ui.selectable_label(is_selected, rich);
@@ -641,5 +1003,75 @@ impl eframe::App for Picker {
                 }
             });
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_color_formats() {
+        let expected = Color32::from_rgb(0xff, 0xa0, 0x4d);
+        assert_eq!(parse_hex_color("#ffa04d"), Some(expected));
+        assert_eq!(parse_hex_color("ffa04d"), Some(expected));
+        assert_eq!(parse_hex_color("  \"#ffa04d\"  "), Some(expected));
+        assert_eq!(parse_hex_color("rgb(255,160,77)"), Some(expected));
+        assert_eq!(parse_hex_color("#fff"), None);
+        assert_eq!(parse_hex_color("not a color"), None);
+    }
+
+    #[test]
+    fn strips_trailing_font_size() {
+        assert_eq!(strip_font_size("FiraCode Nerd Font Mono 11"), "FiraCode Nerd Font Mono");
+        assert_eq!(strip_font_size("'Monospace 10'"), "Monospace");
+        assert_eq!(strip_font_size("JetBrains Mono"), "JetBrains Mono");
+        assert_eq!(strip_font_size("Noto Sans Symbols2"), "Noto Sans Symbols2");
+    }
+
+    #[test]
+    fn takes_bright_black_from_palettes() {
+        let xfce = "#1a0a1a;#d9410e;#4e8234;#e8a33d;#4b2e83;#8b2fc9;#3d8f8f;#d9c8b4;#4a3b52";
+        assert_eq!(palette_bright_black(xfce, ';'), Some(Color32::from_rgb(0x4a, 0x3b, 0x52)));
+
+        let gnome = "['#000', '#1', '#2', '#3', '#4', '#5', '#6', '#7', '#4a3b52']";
+        assert_eq!(palette_bright_black(gnome, ','), Some(Color32::from_rgb(0x4a, 0x3b, 0x52)));
+
+        assert_eq!(palette_bright_black("#1a0a1a;#d9410e", ';'), None);
+    }
+
+    #[test]
+    fn theme_conf_overrides_only_listed_keys() {
+        let mut theme = Theme::default();
+        let original_fg = theme.fg;
+
+        apply_theme_conf(
+            "# comment\nbackground = \"#000000\"\nfont_family = \"DejaVu Sans Mono\"\n",
+            &mut theme,
+        );
+
+        assert_eq!(theme.bg, Color32::from_rgb(0, 0, 0));
+        assert_eq!(theme.font_family, "DejaVu Sans Mono");
+        assert_eq!(theme.fg, original_fg, "unlisted keys must keep their value");
+    }
+
+    #[test]
+    fn theme_conf_ignores_unparseable_color() {
+        let mut theme = Theme::default();
+        let original_bg = theme.bg;
+        apply_theme_conf("background = \"octarine\"\n", &mut theme);
+        assert_eq!(theme.bg, original_bg);
+    }
+
+    #[test]
+    fn maps_windows_alt_codes() {
+        assert_eq!(alt_code_to_char(150), Some('\u{2013}'), "Alt+0150 is an en dash");
+        assert_eq!(alt_code_to_char(151), Some('\u{2014}'), "Alt+0151 is an em dash");
+        assert_eq!(alt_code_to_char(128), Some('€'));
+        // Outside 0x80-0x9F, Windows-1252 matches Unicode exactly.
+        assert_eq!(alt_code_to_char(65), Some('A'));
+        assert_eq!(alt_code_to_char(233), Some('é'));
+        // Alt codes only address a single byte.
+        assert_eq!(alt_code_to_char(256), None);
     }
 }

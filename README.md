@@ -23,6 +23,8 @@ required, works system-wide.
 - **Skin tones** — the list shows each emoji once; `Alt+Enter` lists its
   tones, and a `skin_tone` setting makes plain `Enter` apply yours. See
   [Skin tones](#skin-tones).
+- **Repeat** — `Shift+Enter`, a count, `Enter`: the character that many
+  times. See [Repeating a character](#repeating-a-character).
 - **Windows-style Alt codes** — hold `Alt` and type digits (number row or
   numpad, both work). Releasing `Alt` narrows the list to just the character
   the code resolves to; `Backspace` corrects a digit and `Enter` inserts.
@@ -74,6 +76,7 @@ Then press the hotkey anywhere, search, and hit `Enter`.
 | Right-click       | Toggle favorite    |
 | `Alt`+digits      | Start an Alt code  |
 | `Alt+Enter`       | Pick a skin tone   |
+| `Shift+Enter`     | Repeat: type a count, then `Enter` |
 | `Ctrl+1` / `Ctrl+2` | Switch view (All / Favorites) |
 | `Ctrl+D`          | Set current view as default |
 | `Esc`             | Cancel             |
@@ -125,6 +128,12 @@ skin_tone = medium
 One of `light`, `medium-light`, `medium`, `medium-dark`, `dark`. For
 multi-person emoji the same tone is applied to everyone. Star a toned
 variant and it appears in the Favorites view as is.
+
+## Repeating a character
+
+`Shift+Enter` on an entry asks for a count. Type the digits, `Backspace`
+to correct, `Enter` to insert the character that many times, `Esc` to go
+back. Handy for rules like `────────`. Counts are capped at 200.
 
 ## Theming
 

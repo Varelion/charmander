@@ -18,6 +18,15 @@ include!(concat!(env!("OUT_DIR"), "/characters.rs"));
 const FALLBACK_FONT_FAMILIES: &[&str] =
     &["Symbola", "Noto Sans Symbols2", "Noto Sans Symbols", "Noto Color Emoji"];
 const MAX_RESULTS: usize = 200;
+// Shift+Enter repeat count ceiling: a typo like "1000" must not flood the
+// focused window one synthetic key at a time.
+const MAX_REPEAT: usize = 200;
+
+// "-" × "12" → "------------". None when the count is empty or zero.
+fn repeat_text(glyph: &str, digits: &str) -> Option<String> {
+    let count = digits.parse::<usize>().ok().filter(|&count| count > 0)?;
+    Some(glyph.repeat(count.min(MAX_REPEAT)))
+}
 // Match quality, best first: a whole word ("cat" in CAT FACE or :smiley_cat:),
 // the start of a word (CATALAN), anywhere inside one (dupliCATe).
 const MATCH_WORD: u8 = 0;
@@ -925,6 +934,8 @@ struct Picker {
     // Base emoji whose skin tones are being listed, replacing the search.
     tone_base: Option<String>,
     toned_bases: HashSet<String>,
+    // Shift+Enter: the entry to insert N times and the digits of N so far.
+    repeat: Option<(String, String)>,
     ever_focused: bool,
     theme: Theme,
 }
@@ -946,6 +957,7 @@ impl Picker {
             default_tone: load_skin_tone(),
             tone_base: None,
             toned_bases: skin_tone::toned_bases(CHARACTERS),
+            repeat: None,
             ever_focused: false,
             theme,
         };
@@ -996,10 +1008,53 @@ impl Picker {
         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
     }
 
-    // Plain Enter: the configured tone when the emoji has it, else as listed.
-    fn choose_default(&mut self, glyph: &str, ctx: &egui::Context) {
+    // What plain Enter inserts for a row: the row itself inside the tone
+    // list, otherwise the configured tone when the emoji has one.
+    fn resolved(&self, glyph: &str) -> String {
+        if self.tone_base.is_some() {
+            return glyph.to_owned();
+        }
         let toned = self.default_tone.and_then(|tone| skin_tone::with_tone(glyph, tone, CHARACTERS));
-        self.choose(toned.unwrap_or(glyph), ctx);
+        toned.unwrap_or(glyph).to_owned()
+    }
+
+    fn choose_default(&mut self, glyph: &str, ctx: &egui::Context) {
+        let text = self.resolved(glyph);
+        self.choose(&text, ctx);
+    }
+
+    // Shift+Enter: collect a count, then insert the entry that many times.
+    // Digits and Backspace edit the count; Enter commits; Esc abandons it.
+    fn handle_repeat(&mut self, ctx: &egui::Context) {
+        let Some((_, digits)) = &mut self.repeat else {
+            return;
+        };
+        ctx.input(|i| {
+            for event in &i.events {
+                let egui::Event::Key { key, pressed: true, .. } = event else {
+                    continue;
+                };
+                if *key == Key::Backspace {
+                    digits.pop();
+                } else if let Some(digit) = digit_key(*key) {
+                    digits.push(digit);
+                }
+            }
+        });
+    }
+
+    fn commit_repeat(&mut self, ctx: &egui::Context) {
+        let Some((glyph, digits)) = &self.repeat else {
+            return;
+        };
+        if let Some(text) = repeat_text(glyph, digits) {
+            self.choose(&text, ctx);
+        }
+    }
+
+    fn cancel_repeat(&mut self) {
+        self.repeat = None;
+        self.focus_requested = true;
     }
 
     // Alt+Enter: list the base and its tones in place of the search results.
@@ -1131,9 +1186,12 @@ impl eframe::App for Picker {
         let ctx = ui.ctx().clone();
         let ctx = &ctx;
         let entering_alt_code = self.handle_alt_code(ctx);
+        self.handle_repeat(ctx);
 
         if ctx.input(|i| i.key_pressed(Key::Escape)) {
-            if entering_alt_code {
+            if self.repeat.is_some() {
+                self.cancel_repeat();
+            } else if entering_alt_code {
                 self.cancel_alt_code();
             } else if self.tone_base.is_some() {
                 self.close_tones();
@@ -1176,7 +1234,16 @@ impl eframe::App for Picker {
         // Alt alone (no digits yet) reads as alt-code entry, so Alt+Enter
         // is claimed first.
         let alt_enter = ctx.input(|i| i.modifiers.alt && i.key_pressed(Key::Enter));
-        if alt_enter && self.alt_buffer.is_empty() && self.tone_base.is_none() {
+        let shift_enter = ctx.input(|i| i.modifiers.shift && i.key_pressed(Key::Enter));
+        if self.repeat.is_some() {
+            if ctx.input(|i| i.key_pressed(Key::Enter)) {
+                self.commit_repeat(ctx);
+            }
+        } else if shift_enter && !entering_alt_code {
+            if let Some((glyph, _, _)) = self.results.get(self.selected).cloned() {
+                self.repeat = Some((self.resolved(&glyph), String::new()));
+            }
+        } else if alt_enter && self.alt_buffer.is_empty() && self.tone_base.is_none() {
             if let Some((glyph, _, _)) = self.results.get(self.selected).cloned() {
                 self.open_tones(&glyph, ctx);
             }
@@ -1224,7 +1291,25 @@ impl eframe::App for Picker {
             });
 
             ui.add_space(4.0);
-            if entering_alt_code {
+            if let Some((glyph, digits)) = self.repeat.clone() {
+                // Replaces the search box so the digits reach the count, not
+                // the query. The preview shows what Enter will insert.
+                let count = repeat_text(&glyph, &digits).map(|text| text.chars().count() / glyph.chars().count().max(1));
+                let preview = count.map(|n| format!("  \u{2192}  {n} \u{00d7} {glyph}")).unwrap_or_default();
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(
+                        RichText::new(format!("Repeat {glyph}: {digits}_{preview}"))
+                            .color(theme.accent)
+                            .monospace(),
+                    );
+                    ui.label(
+                        RichText::new("Enter inserts \u{00b7} Backspace edits \u{00b7} Esc back")
+                            .color(theme.dim)
+                            .small(),
+                    )
+                    .on_hover_text(format!("Counts above {MAX_REPEAT} are capped."));
+                });
+            } else if entering_alt_code {
                 // Replaces the search box while entry is active, so TextEdit
                 // never swallows the digit keys. Previewing the character
                 // means Enter never inserts a surprise.
@@ -1393,6 +1478,15 @@ mod tests {
         assert_eq!(match_score("thinking face", "THINKING FACE", ""), Some(MATCH_WORD));
         assert_eq!(match_score("thinking cat", "THINKING FACE", ""), None);
         assert_eq!(match_score(":+1:", "THUMBS UP SIGN", ":thumbsup: :+1:"), Some(MATCH_WORD));
+    }
+
+    #[test]
+    fn repeats_up_to_the_cap() {
+        assert_eq!(repeat_text("\u{1F44D}", "3"), Some("\u{1F44D}\u{1F44D}\u{1F44D}".to_owned()));
+        assert_eq!(repeat_text("-", "012"), Some("-".repeat(12)));
+        assert_eq!(repeat_text("-", "99999"), Some("-".repeat(MAX_REPEAT)));
+        assert_eq!(repeat_text("-", "0"), None);
+        assert_eq!(repeat_text("-", ""), None);
     }
 
     #[test]

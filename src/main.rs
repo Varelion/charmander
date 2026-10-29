@@ -575,6 +575,7 @@ fn main() -> eframe::Result<()> {
     let chosen: Arc<Mutex<Option<char>>> = Arc::new(Mutex::new(None));
     let chosen_for_app = chosen.clone();
     let theme = load_theme();
+    write_settings_template();
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -703,6 +704,45 @@ fn save_default_view(favorites_only: bool) {
     fs::write(path, value).ok();
 }
 
+fn settings_path() -> PathBuf {
+    config_dir().join("settings.conf")
+}
+
+// settings.conf uses the same flat `key = value` shape as theme.conf.
+fn parse_quick_alt(content: &str) -> bool {
+    content
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .filter_map(|line| line.split_once('='))
+        .any(|(key, value)| key.trim() == "quick_alt" && strip_value(value) == "on")
+}
+
+fn load_quick_alt() -> bool {
+    fs::read_to_string(settings_path()).map(|content| parse_quick_alt(&content)).unwrap_or(false)
+}
+
+// Leaves a commented template behind so the setting is discoverable
+// without reading the docs.
+fn write_settings_template() {
+    let path = settings_path();
+    if path.exists() {
+        return;
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).ok();
+    }
+    fs::write(
+        path,
+        "# charmander settings.\n\
+         #\n\
+         # quick_alt: insert an alt code the moment Alt is released, instead\n\
+         # of narrowing the list and waiting for Enter.\n\
+         #quick_alt = on\n",
+    )
+    .ok();
+}
+
 // Draws a terminal-keycap-style badge, e.g. [Ctrl+F] favorite
 fn key_badge(ui: &mut egui::Ui, theme: &Theme, key: &str, action: &str) {
     egui::Frame::new()
@@ -716,43 +756,75 @@ fn key_badge(ui: &mut egui::Ui, theme: &Theme, key: &str, action: &str) {
     ui.label(RichText::new(action).color(theme.fg).small());
 }
 
-// Windows "Alt code" entry: hold Alt, type decimal digits, release Alt.
-// Values 0-255 map through Windows-1252, which is identical to Unicode for
-// 0x00-0x7F and 0xA0-0xFF; only 0x80-0x9F need an explicit override.
-// e.g. Alt+0150 -> EN DASH (-), Alt+0151 -> EM DASH (--).
-fn alt_code_to_char(code: u32) -> Option<char> {
-    let byte = u8::try_from(code).ok()?;
-    let codepoint = match byte {
-        0x80 => 0x20AC, // EURO SIGN
-        0x82 => 0x201A, // SINGLE LOW-9 QUOTATION MARK
-        0x83 => 0x0192, // LATIN SMALL LETTER F WITH HOOK
-        0x84 => 0x201E, // DOUBLE LOW-9 QUOTATION MARK
-        0x85 => 0x2026, // HORIZONTAL ELLIPSIS
-        0x86 => 0x2020, // DAGGER
-        0x87 => 0x2021, // DOUBLE DAGGER
-        0x88 => 0x02C6, // MODIFIER LETTER CIRCUMFLEX ACCENT
-        0x89 => 0x2030, // PER MILLE SIGN
-        0x8A => 0x0160, // LATIN CAPITAL LETTER S WITH CARON
-        0x8B => 0x2039, // SINGLE LEFT-POINTING ANGLE QUOTATION MARK
-        0x8C => 0x0152, // LATIN CAPITAL LIGATURE OE
-        0x8E => 0x017D, // LATIN CAPITAL LETTER Z WITH CARON
-        0x91 => 0x2018, // LEFT SINGLE QUOTATION MARK
-        0x92 => 0x2019, // RIGHT SINGLE QUOTATION MARK
-        0x93 => 0x201C, // LEFT DOUBLE QUOTATION MARK
-        0x94 => 0x201D, // RIGHT DOUBLE QUOTATION MARK
-        0x95 => 0x2022, // BULLET
-        0x96 => 0x2013, // EN DASH
-        0x97 => 0x2014, // EM DASH
-        0x98 => 0x02DC, // SMALL TILDE
-        0x99 => 0x2122, // TRADE MARK SIGN
-        0x9A => 0x0161, // LATIN SMALL LETTER S WITH CARON
-        0x9B => 0x203A, // SINGLE RIGHT-POINTING ANGLE QUOTATION MARK
-        0x9C => 0x0153, // LATIN SMALL LIGATURE OE
-        0x9E => 0x017E, // LATIN SMALL LETTER Z WITH CARON
-        0x9F => 0x0178, // LATIN CAPITAL LETTER Y WITH DIAERESIS
-        other => other as u32,
-    };
-    char::from_u32(codepoint)
+// CP437 (DOS/OEM) codes 1-31. Alt codes render this range as graphics
+// rather than as the control characters the bytes nominally mean.
+#[rustfmt::skip]
+const CP437_GRAPHICS: [char; 32] = [
+    '\0', '☺', '☻', '♥', '♦', '♣', '♠', '•', '◘', '○', '◙', '♂', '♀', '♪', '♫', '☼',
+    '►', '◄', '↕', '‼', '¶', '§', '▬', '↨', '↑', '↓', '→', '←', '∟', '↔', '▲', '▼',
+];
+
+// CP437 codes 128-255: accented latin, box drawing, blocks and maths.
+#[rustfmt::skip]
+const CP437_HIGH: [char; 128] = [
+    'Ç', 'ü', 'é', 'â', 'ä', 'à', 'å', 'ç', 'ê', 'ë', 'è', 'ï', 'î', 'ì', 'Ä', 'Å',
+    'É', 'æ', 'Æ', 'ô', 'ö', 'ò', 'û', 'ù', 'ÿ', 'Ö', 'Ü', '¢', '£', '¥', '₧', 'ƒ',
+    'á', 'í', 'ó', 'ú', 'ñ', 'Ñ', 'ª', 'º', '¿', '⌐', '¬', '½', '¼', '¡', '«', '»',
+    '░', '▒', '▓', '│', '┤', '╡', '╢', '╖', '╕', '╣', '║', '╗', '╝', '╜', '╛', '┐',
+    '└', '┴', '┬', '├', '─', '┼', '╞', '╟', '╚', '╔', '╩', '╦', '╠', '═', '╬', '╧',
+    '╨', '╤', '╥', '╙', '╘', '╒', '╓', '╫', '╪', '┘', '┌', '█', '▄', '▌', '▐', '▀',
+    'α', 'ß', 'Γ', 'π', 'Σ', 'σ', 'µ', 'τ', 'Φ', 'Θ', 'Ω', 'δ', '∞', 'φ', 'ε', '∩',
+    '≡', '±', '≥', '≤', '⌠', '⌡', '÷', '≈', '°', '∙', '·', '√', 'ⁿ', '²', '■', '\u{a0}',
+];
+
+// Windows-1252 (ANSI) differs from Unicode only across 0x80-0x9F.
+#[rustfmt::skip]
+const CP1252_HIGH: [char; 32] = [
+    '€', '\u{81}', '‚', 'ƒ', '„', '…', '†', '‡', 'ˆ', '‰', 'Š', '‹', 'Œ', '\u{8d}', 'Ž', '\u{8f}',
+    '\u{90}', '‘', '’', '“', '”', '•', '–', '—', '˜', '™', 'š', '›', 'œ', '\u{9d}', 'ž', 'Ÿ',
+];
+
+// Resolves a typed alt code the way Windows does, which depends on whether
+// the user typed a leading zero:
+//
+//   Alt+219  -> OEM  (CP437)         -> █
+//   Alt+0219 -> ANSI (Windows-1252)  -> Û
+//
+// The leading zero is why the digits are kept as text rather than a number.
+fn alt_code_to_char(digits: &str) -> Option<char> {
+    let byte = u8::try_from(digits.parse::<u32>().ok()?).ok()?;
+
+    if digits.starts_with('0') {
+        return Some(match byte {
+            0x80..=0x9F => CP1252_HIGH[byte as usize - 0x80],
+            other => char::from_u32(other as u32)?,
+        });
+    }
+
+    Some(match byte {
+        0..=31 => CP437_GRAPHICS[byte as usize],
+        127 => '⌂',
+        128..=255 => CP437_HIGH[byte as usize - 128],
+        other => char::from_u32(other as u32)?,
+    })
+}
+
+// egui maps both the number row and the numpad onto these, so alt codes can
+// be typed from either.
+fn digit_key(key: Key) -> Option<char> {
+    match key {
+        Key::Num0 => Some('0'),
+        Key::Num1 => Some('1'),
+        Key::Num2 => Some('2'),
+        Key::Num3 => Some('3'),
+        Key::Num4 => Some('4'),
+        Key::Num5 => Some('5'),
+        Key::Num6 => Some('6'),
+        Key::Num7 => Some('7'),
+        Key::Num8 => Some('8'),
+        Key::Num9 => Some('9'),
+        _ => None,
+    }
 }
 
 fn type_char(ch: char) {
@@ -771,7 +843,9 @@ struct Picker {
     focus_requested: bool,
     chosen: Arc<Mutex<Option<char>>>,
     alt_buffer: String,
+    alt_active_prev: bool,
     alt_held_prev: bool,
+    quick_alt: bool,
     ever_focused: bool,
     theme: Theme,
 }
@@ -787,7 +861,9 @@ impl Picker {
             focus_requested: true,
             chosen,
             alt_buffer: String::new(),
+            alt_active_prev: false,
             alt_held_prev: false,
+            quick_alt: load_quick_alt(),
             ever_focused: false,
             theme,
         };
@@ -830,50 +906,100 @@ impl Picker {
         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
     }
 
-    // Windows Alt-code entry: hold Alt, type digits, release Alt to commit.
-    fn handle_alt_code(&mut self, ctx: &egui::Context) {
-        const DIGIT_KEYS: [(Key, char); 10] = [
-            (Key::Num0, '0'),
-            (Key::Num1, '1'),
-            (Key::Num2, '2'),
-            (Key::Num3, '3'),
-            (Key::Num4, '4'),
-            (Key::Num5, '5'),
-            (Key::Num6, '6'),
-            (Key::Num7, '7'),
-            (Key::Num8, '8'),
-            (Key::Num9, '9'),
-        ];
-
+    // Alt-code entry. Holding Alt and typing a digit starts it; the digits
+    // then stay put after Alt is released so they can be corrected with
+    // Backspace. Nothing is inserted until Enter, so releasing Alt on a
+    // mistyped code no longer commits it.
+    //
+    // Returns whether entry is active, which takes over Enter and Esc.
+    fn handle_alt_code(&mut self, ctx: &egui::Context) -> bool {
         let alt_now = ctx.input(|i| i.modifiers.alt);
 
-        if alt_now && !self.alt_held_prev {
-            self.alt_buffer.clear();
-        }
-
-        if alt_now {
+        // Digits only *start* entry while Alt is down; once it's underway
+        // they're accepted on their own, so the search box must stay out of
+        // the way until the buffer is empty again.
+        let mut edited = false;
+        if alt_now || !self.alt_buffer.is_empty() {
+            let buffer = &mut self.alt_buffer;
             ctx.input(|i| {
                 for event in &i.events {
-                    let egui::Event::Key { key, pressed: true, repeat: false, .. } = event else {
+                    let egui::Event::Key { key, pressed: true, repeat, .. } = event else {
                         continue;
                     };
-                    if let Some((_, digit)) = DIGIT_KEYS.iter().find(|(k, _)| k == key) {
-                        self.alt_buffer.push(*digit);
+
+                    if *key == Key::Backspace {
+                        buffer.pop();
+                        edited = true;
+                    } else if let Some(digit) = digit_key(*key)
+                        && !repeat
+                    {
+                        buffer.push(digit);
+                        edited = true;
                     }
                 }
             });
         }
 
-        if !alt_now && self.alt_held_prev && !self.alt_buffer.is_empty() {
-            if let Some(ch) = self.alt_buffer.parse::<u32>().ok().and_then(alt_code_to_char) {
-                *self.chosen.lock().unwrap() = Some(ch);
-                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-            }
-            self.alt_buffer.clear();
-            self.focus_requested = true;
+        let released = self.alt_held_prev && !alt_now && !self.alt_buffer.is_empty();
+        self.alt_held_prev = alt_now;
+
+        // Quick mode trades the confirmation step for speed: the code fires
+        // the moment Alt comes up.
+        if released && self.quick_alt {
+            self.commit_alt_code(ctx);
         }
 
-        self.alt_held_prev = alt_now;
+        // Otherwise, once Alt is up the list collapses to just the character
+        // the code resolves to, so it's confirmed like any searched one.
+        // Only recomputed on an actual edit, since it scans the whole table.
+        if !alt_now && !self.alt_buffer.is_empty() && (edited || released) {
+            self.show_alt_result();
+        }
+
+        let active = alt_now || !self.alt_buffer.is_empty();
+
+        // Entry just ended: hand focus back to the search box, which lost it
+        // while the indicator stood in for it, and restore the full list.
+        if self.alt_active_prev && !active {
+            self.focus_requested = true;
+            self.refresh_results();
+        }
+        self.alt_active_prev = active;
+
+        active
+    }
+
+    // The single row shown after Alt is released. An unresolvable code (out
+    // of range, or no digits yet) leaves the list empty.
+    fn show_alt_result(&mut self) {
+        let resolved = alt_code_to_char(&self.alt_buffer);
+        self.results = resolved
+            .map(|ch| {
+                let codepoint = ch as u32;
+                let name = CHARACTERS
+                    .iter()
+                    .find(|(candidate, _)| *candidate == codepoint)
+                    .map(|(_, name)| *name)
+                    .unwrap_or("UNNAMED CHARACTER");
+                vec![(codepoint, name)]
+            })
+            .unwrap_or_default();
+        self.selected = 0;
+    }
+
+    // Inserts the typed alt code. An out-of-range code is left in place
+    // rather than discarded, so it can be corrected.
+    fn commit_alt_code(&mut self, ctx: &egui::Context) {
+        let Some(ch) = alt_code_to_char(&self.alt_buffer) else {
+            return;
+        };
+        *self.chosen.lock().unwrap() = Some(ch);
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+    }
+
+    fn cancel_alt_code(&mut self) {
+        self.alt_buffer.clear();
+        self.focus_requested = true;
     }
 }
 
@@ -881,9 +1007,14 @@ impl eframe::App for Picker {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         let ctx = &ctx;
-        self.handle_alt_code(ctx);
+        let entering_alt_code = self.handle_alt_code(ctx);
+
         if ctx.input(|i| i.key_pressed(Key::Escape)) {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            if entering_alt_code {
+                self.cancel_alt_code();
+            } else {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
         }
         // Lost window focus (alt-tab, click elsewhere, switch workspace): close.
         // `ever_focused` guards against the brief unfocused state some window
@@ -917,10 +1048,12 @@ impl eframe::App for Picker {
         if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(Key::D)) {
             save_default_view(self.favorites_only);
         }
-        if ctx.input(|i| i.key_pressed(Key::Enter))
-            && let Some((codepoint, _)) = self.results.get(self.selected).copied()
-        {
-            self.choose(codepoint, ctx);
+        if ctx.input(|i| i.key_pressed(Key::Enter)) {
+            if entering_alt_code {
+                self.commit_alt_code(ctx);
+            } else if let Some((codepoint, _)) = self.results.get(self.selected).copied() {
+                self.choose(codepoint, ctx);
+            }
         }
 
         let theme = self.theme.clone();
@@ -955,14 +1088,48 @@ impl eframe::App for Picker {
             });
 
             ui.add_space(4.0);
-            if self.alt_held_prev {
-                // Alt is down: show the digits being captured instead of the
-                // search box, so TextEdit never steals the digit key events.
-                ui.label(
-                    RichText::new(format!("Alt code: {}_", self.alt_buffer))
-                        .color(theme.accent)
-                        .monospace(),
-                );
+            if entering_alt_code {
+                // Replaces the search box while entry is active, so TextEdit
+                // never swallows the digit keys. Previewing the character
+                // means Enter never inserts a surprise.
+                let preview = alt_code_to_char(&self.alt_buffer)
+                    .map(|ch| format!("  \u{2192}  {ch}"))
+                    .unwrap_or_default();
+
+                // Which code page is in play is worth stating: the same
+                // digits mean different characters with and without the
+                // leading zero.
+                let hint = match self.alt_buffer.chars().next() {
+                    Some('0') => "ANSI \u{00b7} Enter inserts \u{00b7} Backspace edits",
+                    Some(_) => "OEM \u{00b7} Enter inserts \u{00b7} Backspace edits",
+                    None => "type digits while holding Alt",
+                };
+
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(
+                        RichText::new(format!("Alt code: {}_{preview}", self.alt_buffer))
+                            .color(theme.accent)
+                            .monospace(),
+                    );
+                    ui.label(RichText::new(hint).color(theme.dim).small()).on_hover_text(
+                        "A leading zero selects ANSI (Windows-1252); without one the code is \
+                         OEM (CP437).\nAlt+219 is a full block, Alt+0219 is U with circumflex.",
+                    );
+                });
+
+                // Surfaced inline rather than as a hover tooltip: this is a
+                // keyboard flow, so a hint that needs the mouse to find is a
+                // hint nobody reads.
+                if !self.quick_alt {
+                    ui.label(
+                        RichText::new(
+                            "Tip: set quick_alt = on in settings.conf to insert the \
+                             moment Alt is released",
+                        )
+                        .color(theme.dim)
+                        .small(),
+                    );
+                }
             } else {
                 let search = ui.text_edit_singleline(&mut self.query);
                 if self.focus_requested {
@@ -1063,15 +1230,46 @@ mod tests {
         assert_eq!(theme.bg, original_bg);
     }
 
+    // A leading zero selects ANSI (Windows-1252); without one the code is
+    // OEM (CP437), which is a different character for the same number.
     #[test]
-    fn maps_windows_alt_codes() {
-        assert_eq!(alt_code_to_char(150), Some('\u{2013}'), "Alt+0150 is an en dash");
-        assert_eq!(alt_code_to_char(151), Some('\u{2014}'), "Alt+0151 is an em dash");
-        assert_eq!(alt_code_to_char(128), Some('€'));
+    fn maps_ansi_alt_codes() {
+        assert_eq!(alt_code_to_char("0150"), Some('\u{2013}'), "Alt+0150 is an en dash");
+        assert_eq!(alt_code_to_char("0151"), Some('\u{2014}'), "Alt+0151 is an em dash");
+        assert_eq!(alt_code_to_char("0128"), Some('€'));
+        assert_eq!(alt_code_to_char("0163"), Some('£'));
         // Outside 0x80-0x9F, Windows-1252 matches Unicode exactly.
-        assert_eq!(alt_code_to_char(65), Some('A'));
-        assert_eq!(alt_code_to_char(233), Some('é'));
-        // Alt codes only address a single byte.
-        assert_eq!(alt_code_to_char(256), None);
+        assert_eq!(alt_code_to_char("065"), Some('A'));
+        assert_eq!(alt_code_to_char("0233"), Some('é'));
+    }
+
+    #[test]
+    fn maps_oem_alt_codes() {
+        assert_eq!(alt_code_to_char("1"), Some('☺'));
+        assert_eq!(alt_code_to_char("3"), Some('♥'));
+        assert_eq!(alt_code_to_char("15"), Some('☼'));
+        assert_eq!(alt_code_to_char("219"), Some('█'), "Alt+219 is a full block");
+        assert_eq!(alt_code_to_char("220"), Some('▄'));
+        assert_eq!(alt_code_to_char("156"), Some('£'));
+        assert_eq!(alt_code_to_char("251"), Some('√'));
+        assert_eq!(alt_code_to_char("65"), Some('A'), "the ASCII range is unchanged");
+        // Same number, different code page.
+        assert_eq!(alt_code_to_char("150"), Some('û'));
+    }
+
+    #[test]
+    fn reads_quick_alt_setting() {
+        assert!(parse_quick_alt("quick_alt = on"));
+        assert!(parse_quick_alt("# comment\n\nquick_alt=\"on\"\n"));
+        assert!(!parse_quick_alt("quick_alt = off"));
+        assert!(!parse_quick_alt("#quick_alt = on"), "the template default stays off");
+        assert!(!parse_quick_alt(""));
+    }
+
+    #[test]
+    fn rejects_out_of_range_alt_codes() {
+        assert_eq!(alt_code_to_char("256"), None, "alt codes address a single byte");
+        assert_eq!(alt_code_to_char("0256"), None);
+        assert_eq!(alt_code_to_char(""), None);
     }
 }

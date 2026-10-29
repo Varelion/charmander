@@ -17,9 +17,11 @@ required, works system-wide.
 - **Views** — switch between `All` and `★ Favorites` with `Ctrl+1` / `Ctrl+2`.
   `Ctrl+D` saves whichever view is active as the one charmander opens to next
   time.
-- **Windows-style Alt codes** — hold `Alt`, type digits (number row or
-  numpad, both work), release `Alt`. Resolves through Windows-1252, same as
-  real Windows Alt codes (e.g. `Alt+0150` → en dash, `Alt+0151` → em dash).
+- **Windows-style Alt codes** — hold `Alt` and type digits (number row or
+  numpad, both work). Releasing `Alt` narrows the list to just the character
+  the code resolves to; `Backspace` corrects a digit and `Enter` inserts.
+  Both code pages behave as they do on Windows — see
+  [Alt codes](#alt-codes).
 - **Matches your terminal** — picks up colors and font from your default
   terminal's config, so it doesn't look foreign next to it. See
   [Theming](#theming).
@@ -64,10 +66,40 @@ Then press the hotkey anywhere, search, and hit `Enter`.
 | `↑` / `↓`         | Navigate list      |
 | `Ctrl+F`          | Toggle favorite    |
 | Right-click       | Toggle favorite    |
-| `Alt`+digits      | Windows Alt code   |
+| `Alt`+digits      | Start an Alt code  |
 | `Ctrl+1` / `Ctrl+2` | Switch view (All / Favorites) |
 | `Ctrl+D`          | Set current view as default |
 | `Esc`             | Cancel             |
+
+## Alt codes
+
+Hold `Alt` and type digits. Releasing `Alt` narrows the list to the single
+character the code resolves to; `Backspace` corrects a digit, `Enter`
+inserts, `Esc` abandons the code and returns to search.
+
+Which character you get depends on the leading zero, exactly as on Windows:
+
+| Typed | Code page | Result |
+|-------|-----------|--------|
+| `Alt+1` | OEM (CP437) | ☺ |
+| `Alt+3` | OEM (CP437) | ♥ |
+| `Alt+219` | OEM (CP437) | █ |
+| `Alt+156` | OEM (CP437) | £ |
+| `Alt+0150` | ANSI (Windows-1252) | – (en dash) |
+| `Alt+0151` | ANSI (Windows-1252) | — (em dash) |
+| `Alt+0128` | ANSI (Windows-1252) | € |
+
+Without a leading zero the code is OEM/CP437 — the old DOS page, which is
+where the box-drawing and block characters live. With one it's
+ANSI/Windows-1252. The same digits mean different things in each: `Alt+150`
+is `û`, `Alt+0150` is an en dash.
+
+To insert the moment `Alt` is released, skipping the `Enter` confirmation,
+set this in `~/.config/charmander/settings.conf`:
+
+```ini
+quick_alt = on
+```
 
 ## Theming
 
@@ -107,6 +139,7 @@ fill, `accent` is the selection/cursor color.
 | `~/.config/charmander/theme.conf` | Color/font overrides |
 | `~/.config/charmander/favorites.txt` | Starred codepoints, one hex per line |
 | `~/.config/charmander/default_view.txt` | `all` or `favorites` |
+| `~/.config/charmander/settings.conf` | `quick_alt` |
 
 On Windows these live under `%APPDATA%\charmander\`; `$XDG_CONFIG_HOME` is
 respected where set.

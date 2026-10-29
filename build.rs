@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::path::Path;
@@ -27,33 +28,32 @@ fn single_codepoints(raw: &str) -> Vec<(String, String)> {
     entries
 }
 
-// Emoji built from several codepoints (ZWJ families, skin tones, flags,
-// keycaps, text symbols with a presentation selector), e.g.
+const NAME_SEPARATOR: &str = " / ";
+
+// Emoji from emoji-test.txt, e.g.
 //   "1F468 200D 1F9B0 ; fully-qualified # 👨‍🦰 E11.0 man: red hair"
-// Single-codepoint emoji are already covered by UnicodeData.txt.
-fn emoji_sequences(raw: &str) -> Vec<(String, String)> {
+// Returns the codepoints and the upper-cased common name.
+fn emoji_entries(raw: &str) -> Vec<(Vec<u32>, String)> {
     let mut entries = Vec::new();
     for line in raw.lines() {
         let Some((codepoints, rest)) = line.split_once(FULLY_QUALIFIED) else {
             continue;
         };
-        let codepoints: Vec<&str> = codepoints.split_whitespace().collect();
-        if codepoints.len() < 2 {
-            continue;
-        }
-
-        let glyph: String = codepoints
-            .iter()
+        let codepoints: Vec<u32> = codepoints
+            .split_whitespace()
             .map(|hex| u32::from_str_radix(hex, 16).expect("valid hex codepoint"))
-            .map(|cp| char::from_u32(cp).expect("scalar value"))
             .collect();
 
         // Comment is "# <glyph> E<version> <name>"
         let comment = rest.split_once('#').map(|(_, c)| c.trim()).unwrap_or_default();
         let name = comment.splitn(3, ' ').nth(2).expect("emoji name").to_uppercase();
-        entries.push((glyph, name));
+        entries.push((codepoints, name));
     }
     entries
+}
+
+fn glyph(codepoints: &[u32]) -> String {
+    codepoints.iter().map(|&cp| char::from_u32(cp).expect("scalar value")).collect()
 }
 
 fn main() {
@@ -63,10 +63,28 @@ fn main() {
     let unicode_data = fs::read_to_string(UNICODE_DATA).expect("read UnicodeData.txt");
     let emoji_test = fs::read_to_string(EMOJI_TEST).expect("read emoji-test.txt");
 
+    let (singles, sequences): (Vec<_>, Vec<_>) =
+        emoji_entries(&emoji_test).into_iter().partition(|(cps, _)| cps.len() == 1);
+
+    // Single emoji are already in UnicodeData.txt, but often under another
+    // name: U+1F346 is "AUBERGINE" there and "eggplant" everywhere else.
+    // Both names are kept so either one finds it.
+    let common_names: HashMap<String, String> =
+        singles.into_iter().map(|(cps, name)| (glyph(&cps), name)).collect();
+    let mut entries = single_codepoints(&unicode_data);
+    for (glyph, name) in &mut entries {
+        let Some(common) = common_names.get(glyph) else {
+            continue;
+        };
+        if common != name {
+            name.push_str(NAME_SEPARATOR);
+            name.push_str(common);
+        }
+    }
+
     // Sequences sort next to their base character, so "👍" is followed by
     // its skin tones. The sort is stable, so singles stay ahead of them.
-    let mut entries = single_codepoints(&unicode_data);
-    entries.extend(emoji_sequences(&emoji_test));
+    entries.extend(sequences.into_iter().map(|(cps, name)| (glyph(&cps), name)));
     entries.sort_by_key(|(glyph, _)| glyph.chars().next().map(|c| c as u32));
 
     let mut out = String::from("pub static CHARACTERS: &[(&str, &str)] = &[\n");

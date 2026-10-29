@@ -1187,6 +1187,15 @@ impl eframe::App for Picker {
 mod tests {
     use super::*;
 
+    // The formal name alone hides emoji behind words nobody searches for.
+    #[test]
+    fn lists_common_emoji_names() {
+        let name = |glyph: &str| CHARACTERS.iter().find(|(g, _)| *g == glyph).map(|(_, n)| *n);
+        assert_eq!(name("\u{1F346}"), Some("AUBERGINE / EGGPLANT"));
+        assert_eq!(name("\u{1F914}"), Some("THINKING FACE"));
+        assert_eq!(name("\u{1F468}\u{200D}\u{1F9B0}"), Some("MAN: RED HAIR"));
+    }
+
     #[test]
     fn parses_color_formats() {
         let expected = Color32::from_rgb(0xff, 0xa0, 0x4d);

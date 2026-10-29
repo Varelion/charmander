@@ -5,6 +5,10 @@ use std::path::Path;
 
 const UNICODE_DATA: &str = "data/UnicodeData.txt";
 const EMOJI_TEST: &str = "data/emoji-test.txt";
+const SHORTCODES: &str = "data/shortcodes.txt";
+// Presentation selector: shortcode tables leave it out, the emoji table
+// keeps it, so both sides drop it before matching.
+const VARIATION_SELECTOR: char = '\u{FE0F}';
 // Only this status marks the canonical form of an emoji; the other
 // statuses are the same emoji with selectors missing or just components.
 const FULLY_QUALIFIED: &str = "; fully-qualified";
@@ -52,6 +56,32 @@ fn emoji_entries(raw: &str) -> Vec<(Vec<u32>, String)> {
     entries
 }
 
+// Chat-style names per glyph, e.g. "1F63A\tsmiley_cat grinning_cat"
+// becomes ":smiley_cat: :grinning_cat:", keyed like `codepoint_key`.
+fn shortcodes(raw: &str) -> HashMap<String, String> {
+    raw.lines()
+        .filter(|line| !line.starts_with('#'))
+        .filter_map(|line| line.split_once('\t'))
+        .map(|(codepoints, names)| {
+            let codepoints: Vec<u32> = codepoints
+                .split_whitespace()
+                .map(|hex| u32::from_str_radix(hex, 16).expect("valid hex codepoint"))
+                .collect();
+            let keywords: Vec<String> = names.split_whitespace().map(|n| format!(":{n}:")).collect();
+            (codepoint_key(&glyph(&codepoints)), keywords.join(" "))
+        })
+        .collect()
+}
+
+fn codepoint_key(glyph: &str) -> String {
+    glyph
+        .chars()
+        .filter(|&ch| ch != VARIATION_SELECTOR)
+        .map(|ch| format!("{:04X}", ch as u32))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn glyph(codepoints: &[u32]) -> String {
     codepoints.iter().map(|&cp| char::from_u32(cp).expect("scalar value")).collect()
 }
@@ -59,9 +89,11 @@ fn glyph(codepoints: &[u32]) -> String {
 fn main() {
     println!("cargo:rerun-if-changed={UNICODE_DATA}");
     println!("cargo:rerun-if-changed={EMOJI_TEST}");
+    println!("cargo:rerun-if-changed={SHORTCODES}");
 
     let unicode_data = fs::read_to_string(UNICODE_DATA).expect("read UnicodeData.txt");
     let emoji_test = fs::read_to_string(EMOJI_TEST).expect("read emoji-test.txt");
+    let shortcodes = shortcodes(&fs::read_to_string(SHORTCODES).expect("read shortcodes.txt"));
 
     let (singles, sequences): (Vec<_>, Vec<_>) =
         emoji_entries(&emoji_test).into_iter().partition(|(cps, _)| cps.len() == 1);
@@ -87,9 +119,10 @@ fn main() {
     entries.extend(sequences.into_iter().map(|(cps, name)| (glyph(&cps), name)));
     entries.sort_by_key(|(glyph, _)| glyph.chars().next().map(|c| c as u32));
 
-    let mut out = String::from("pub static CHARACTERS: &[(&str, &str)] = &[\n");
+    let mut out = String::from("pub static CHARACTERS: &[(&str, &str, &str)] = &[\n");
     for (glyph, name) in &entries {
-        out.push_str(&format!("    ({glyph:?}, {name:?}),\n"));
+        let keywords = shortcodes.get(&codepoint_key(glyph)).map(String::as_str).unwrap_or("");
+        out.push_str(&format!("    ({glyph:?}, {name:?}, {keywords:?}),\n"));
     }
     out.push_str("];\n");
 

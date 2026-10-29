@@ -63,19 +63,19 @@ pub(crate) fn base_of(glyph: &str) -> String {
 }
 
 // Every base that has at least one toned variant, for a cheap per-row check.
-pub(crate) fn toned_bases(table: &[(&str, &str)]) -> HashSet<String> {
-    table.iter().filter(|(glyph, _)| has_tone(glyph)).map(|(glyph, _)| base_of(glyph)).collect()
+pub(crate) fn toned_bases(table: &[(&str, &str, &str)]) -> HashSet<String> {
+    table.iter().filter(|(glyph, _, _)| has_tone(glyph)).map(|(glyph, _, _)| base_of(glyph)).collect()
 }
 
 // All toned variants of a base, in table order.
 pub(crate) fn variants_of<'a>(
     base: &str,
-    table: &'a [(&'a str, &'a str)],
-) -> Vec<(&'a str, &'a str)> {
+    table: &'a [(&'a str, &'a str, &'a str)],
+) -> Vec<(&'a str, &'a str, &'a str)> {
     table
         .iter()
-        .filter(|(glyph, _)| has_tone(glyph) && base_of(glyph) == base)
-        .map(|(glyph, name)| (*glyph, *name))
+        .filter(|(glyph, _, _)| has_tone(glyph) && base_of(glyph) == base)
+        .map(|(glyph, name, keywords)| (*glyph, *name, *keywords))
         .collect()
 }
 
@@ -83,11 +83,11 @@ pub(crate) fn variants_of<'a>(
 pub(crate) fn with_tone<'a>(
     base: &str,
     tone: SkinTone,
-    table: &'a [(&'a str, &'a str)],
+    table: &'a [(&'a str, &'a str, &'a str)],
 ) -> Option<&'a str> {
     variants_of(base, table)
         .into_iter()
-        .map(|(glyph, _)| glyph)
+        .map(|(glyph, _, _)| glyph)
         .find(|glyph| glyph.chars().filter(|ch| is_modifier(*ch)).all(|ch| ch == tone.modifier()))
 }
 
@@ -95,14 +95,14 @@ pub(crate) fn with_tone<'a>(
 mod tests {
     use super::*;
 
-    const TABLE: &[(&str, &str)] = &[
-        ("\u{1F44D}", "THUMBS UP SIGN"),
-        ("\u{1F44D}\u{1F3FB}", "THUMBS UP: LIGHT SKIN TONE"),
-        ("\u{1F44D}\u{1F3FD}", "THUMBS UP: MEDIUM SKIN TONE"),
-        ("\u{1F91D}", "HANDSHAKE"),
-        ("\u{1FAF1}\u{1F3FB}\u{200D}\u{1FAF2}\u{1F3FC}", "HANDSHAKE: LIGHT, MEDIUM-LIGHT"),
-        ("\u{1FAF1}\u{1F3FD}\u{200D}\u{1FAF2}\u{1F3FD}", "HANDSHAKE: MEDIUM, MEDIUM"),
-        ("\u{1F346}", "AUBERGINE / EGGPLANT"),
+    const TABLE: &[(&str, &str, &str)] = &[
+        ("\u{1F44D}", "THUMBS UP SIGN", ""),
+        ("\u{1F44D}\u{1F3FB}", "THUMBS UP: LIGHT SKIN TONE", ""),
+        ("\u{1F44D}\u{1F3FD}", "THUMBS UP: MEDIUM SKIN TONE", ""),
+        ("\u{1F91D}", "HANDSHAKE", ""),
+        ("\u{1FAF1}\u{1F3FB}\u{200D}\u{1FAF2}\u{1F3FC}", "HANDSHAKE: LIGHT, MEDIUM-LIGHT", ""),
+        ("\u{1FAF1}\u{1F3FD}\u{200D}\u{1FAF2}\u{1F3FD}", "HANDSHAKE: MEDIUM, MEDIUM", ""),
+        ("\u{1F346}", "AUBERGINE / EGGPLANT", ""),
     ];
 
     #[test]
@@ -115,7 +115,7 @@ mod tests {
 
     #[test]
     fn lists_variants_of_base() {
-        let names: Vec<&str> = variants_of("\u{1F44D}", TABLE).into_iter().map(|(_, n)| n).collect();
+        let names: Vec<&str> = variants_of("\u{1F44D}", TABLE).into_iter().map(|(_, n, _)| n).collect();
         assert_eq!(names, ["THUMBS UP: LIGHT SKIN TONE", "THUMBS UP: MEDIUM SKIN TONE"]);
         assert!(variants_of("\u{1F346}", TABLE).is_empty());
     }

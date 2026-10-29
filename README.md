@@ -11,9 +11,10 @@ required, works system-wide.
 
 ## Features
 
-- **Search** — live substring search over every named Unicode character
-  and emoji, including multi-codepoint ones: flags, families, keycaps,
-  skin tones.
+- **Search** — live search over every named Unicode character and emoji,
+  plus chat shortcodes (`:thumbsup:`, `:smiley_cat:`, the names Discord
+  uses). Whole-word hits rank first, so "cat" lists cats before
+  "dupliCATe".
 - **Favorites** — star any character (`Ctrl+F` or right-click). Favorited
   entries show `★`, everything else shows `☆`.
 - **Views** — switch between `All` and `★ Favorites` with `Ctrl+1` / `Ctrl+2`.
@@ -173,7 +174,9 @@ respected where set.
 Character names come from the Unicode Character Database
 (`UnicodeData.txt`) and emoji sequences from `emoji-test.txt`, both
 Unicode, Inc., used under the [Unicode License
-Agreement](https://www.unicode.org/license.txt).
+Agreement](https://www.unicode.org/license.txt). Shortcodes are the
+JoyPixels set from [emojibase](https://github.com/milesj/emojibase)
+(`data/shortcodes.txt`, MIT).
 
 ## License
 

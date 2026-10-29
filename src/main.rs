@@ -18,6 +18,45 @@ include!(concat!(env!("OUT_DIR"), "/characters.rs"));
 const FALLBACK_FONT_FAMILIES: &[&str] =
     &["Symbola", "Noto Sans Symbols2", "Noto Sans Symbols", "Noto Color Emoji"];
 const MAX_RESULTS: usize = 200;
+// Match quality, best first: a whole word ("cat" in CAT FACE or :smiley_cat:),
+// the start of a word (CATALAN), anywhere inside one (dupliCATe).
+const MATCH_WORD: u8 = 0;
+const MATCH_PREFIX: u8 = 1;
+const MATCH_SUBSTRING: u8 = 2;
+const WORD_BREAKS: &[char] = &[' ', '-', '_', ':', ',', '/', '(', ')'];
+
+// How well `query` fits an entry, or None when any of its words is absent.
+// Every query word must match somewhere; the entry ranks by its worst word.
+fn match_score(query: &str, name: &str, keywords: &str) -> Option<u8> {
+    let name = name.to_lowercase();
+    let mut worst = MATCH_WORD;
+
+    for token in query.split_whitespace() {
+        let token = token.trim_matches(':');
+        if token.is_empty() {
+            continue;
+        }
+
+        let words = name.split(WORD_BREAKS).chain(keywords.split(WORD_BREAKS));
+        let best = words
+            .filter_map(|word| {
+                if word == token {
+                    Some(MATCH_WORD)
+                } else if word.starts_with(token) {
+                    Some(MATCH_PREFIX)
+                } else if word.contains(token) {
+                    Some(MATCH_SUBSTRING)
+                } else {
+                    None
+                }
+            })
+            .min()?;
+        worst = worst.max(best);
+    }
+
+    Some(worst)
+}
+
 // Favorites are stored as the hex codepoints of an entry, space separated
 // for sequences: "1F914" or "1F468 200D 1F9B0".
 const CODEPOINT_SEPARATOR: &str = " ";
@@ -875,7 +914,7 @@ struct Picker {
     favorites: HashSet<String>,
     favorites_only: bool,
     selected: usize,
-    results: Vec<(String, &'static str)>,
+    results: Vec<(String, &'static str, &'static str)>,
     focus_requested: bool,
     chosen: Arc<Mutex<Option<String>>>,
     alt_buffer: String,
@@ -919,20 +958,25 @@ impl Picker {
         let favorites_only = self.favorites_only;
         let favorites = &self.favorites;
 
-        let results: Vec<(String, &'static str)> = CHARACTERS
+        let mut scored: Vec<(u8, &(&str, &str, &str))> = CHARACTERS
             .iter()
-            .filter(|(glyph, name)| {
+            .filter(|(glyph, _, _)| {
                 if favorites_only && !favorites.contains(&codepoint_key(glyph)) {
                     return false;
                 }
                 // Toned variants stay behind Alt+Enter, unless starred.
-                if !favorites_only && skin_tone::has_tone(glyph) {
-                    return false;
-                }
-                query.is_empty() || name.to_lowercase().contains(&query)
+                !(!favorites_only && skin_tone::has_tone(glyph))
             })
+            .filter_map(|entry| match_score(&query, entry.1, entry.2).map(|score| (score, entry)))
+            .collect();
+
+        // Equal matches put emoji with shortcodes first, then codepoint
+        // order (the sort is stable), so "cat" opens with 🐈 not YI SYLLABLE CAT.
+        scored.sort_by_key(|(score, (_, _, keywords))| (*score, keywords.is_empty()));
+        let results: Vec<(String, &'static str, &'static str)> = scored
+            .into_iter()
             .take(MAX_RESULTS)
-            .map(|(glyph, name)| (glyph.to_string(), *name))
+            .map(|(_, (glyph, name, keywords))| (glyph.to_string(), *name, *keywords))
             .collect();
 
         self.selected = self.selected.min(results.len().saturating_sub(1));
@@ -967,9 +1011,13 @@ impl Picker {
             return;
         }
 
-        let base = CHARACTERS.iter().find(|(g, _)| *g == glyph).map(|(_, n)| *n).unwrap_or("");
-        let mut results = vec![(glyph.to_string(), base)];
-        results.extend(variants.into_iter().map(|(g, n)| (g.to_string(), n)));
+        let (name, keywords) = CHARACTERS
+            .iter()
+            .find(|(g, _, _)| *g == glyph)
+            .map(|(_, n, k)| (*n, *k))
+            .unwrap_or_default();
+        let mut results = vec![(glyph.to_string(), name, keywords)];
+        results.extend(variants.into_iter().map(|(g, n, k)| (g.to_string(), n, k)));
         self.results = results;
         self.selected = 0;
         self.tone_base = Some(glyph.to_string());
@@ -1051,12 +1099,12 @@ impl Picker {
         self.results = resolved
             .map(|ch| {
                 let glyph = ch.to_string();
-                let name = CHARACTERS
+                let (name, keywords) = CHARACTERS
                     .iter()
-                    .find(|(candidate, _)| *candidate == glyph)
-                    .map(|(_, name)| *name)
-                    .unwrap_or("UNNAMED CHARACTER");
-                vec![(glyph, name)]
+                    .find(|(candidate, _, _)| *candidate == glyph)
+                    .map(|(_, name, keywords)| (*name, *keywords))
+                    .unwrap_or(("UNNAMED CHARACTER", ""));
+                vec![(glyph, name, keywords)]
             })
             .unwrap_or_default();
         self.selected = 0;
@@ -1110,7 +1158,7 @@ impl eframe::App for Picker {
             self.selected = self.selected.saturating_sub(1);
         }
         if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(Key::F))
-            && let Some((glyph, _)) = self.results.get(self.selected).cloned()
+            && let Some((glyph, _, _)) = self.results.get(self.selected).cloned()
         {
             self.toggle_favorite(&glyph);
         }
@@ -1129,13 +1177,13 @@ impl eframe::App for Picker {
         // is claimed first.
         let alt_enter = ctx.input(|i| i.modifiers.alt && i.key_pressed(Key::Enter));
         if alt_enter && self.alt_buffer.is_empty() && self.tone_base.is_none() {
-            if let Some((glyph, _)) = self.results.get(self.selected).cloned() {
+            if let Some((glyph, _, _)) = self.results.get(self.selected).cloned() {
                 self.open_tones(&glyph, ctx);
             }
         } else if ctx.input(|i| i.key_pressed(Key::Enter)) {
             if entering_alt_code {
                 self.commit_alt_code(ctx);
-            } else if let Some((glyph, _)) = self.results.get(self.selected).cloned() {
+            } else if let Some((glyph, _, _)) = self.results.get(self.selected).cloned() {
                 if self.tone_base.is_some() {
                     self.choose(&glyph, ctx);
                 } else {
@@ -1258,11 +1306,16 @@ impl eframe::App for Picker {
             ui.separator();
 
             egui::ScrollArea::vertical().show(ui, |ui| {
-                for (idx, (glyph, name)) in self.results.clone().iter().enumerate() {
+                for (idx, (glyph, name, keywords)) in self.results.clone().iter().enumerate() {
                     let is_favorite = self.favorites.contains(&codepoint_key(glyph));
                     let is_selected = idx == self.selected;
                     let star = if is_favorite { "★" } else { "☆" };
-                    let text = format!("{glyph}  {name}  ({})  {star}", codepoint_label(glyph));
+                    let codes = codepoint_label(glyph);
+                    let text = if keywords.is_empty() {
+                        format!("{glyph}  {name}  ({codes})  {star}")
+                    } else {
+                        format!("{glyph}  {name}  {keywords}  ({codes})  {star}")
+                    };
 
                     let rich = if is_selected {
                         RichText::new(text).color(Color32::BLACK).background_color(theme.accent)
@@ -1310,10 +1363,36 @@ mod tests {
     // The formal name alone hides emoji behind words nobody searches for.
     #[test]
     fn lists_common_emoji_names() {
-        let name = |glyph: &str| CHARACTERS.iter().find(|(g, _)| *g == glyph).map(|(_, n)| *n);
+        let name = |glyph: &str| CHARACTERS.iter().find(|(g, _, _)| *g == glyph).map(|(_, n, _)| *n);
         assert_eq!(name("\u{1F346}"), Some("AUBERGINE / EGGPLANT"));
         assert_eq!(name("\u{1F914}"), Some("THINKING FACE"));
         assert_eq!(name("\u{1F468}\u{200D}\u{1F9B0}"), Some("MAN: RED HAIR"));
+    }
+
+    #[test]
+    fn lists_shortcodes_as_keywords() {
+        let keywords =
+            |glyph: &str| CHARACTERS.iter().find(|(g, _, _)| *g == glyph).map(|(_, _, k)| *k);
+        assert_eq!(keywords("\u{1F63A}"), Some(":smiley_cat: :grinning_cat:"));
+        assert_eq!(keywords("\u{1F44D}"), Some(":thumbsup: :+1: :thumbup: :thumbs_up:"));
+        assert!(keywords("\u{1F914}").unwrap().contains(":thinking:"));
+        assert!(keywords("\u{2764}\u{FE0F}").unwrap().contains(":heart:"), "selector is ignored");
+        assert_eq!(keywords("A"), Some(""));
+    }
+
+    // "cat" must list cats before every "dupliCATe" and "loCATion".
+    #[test]
+    fn ranks_whole_words_over_substrings() {
+        assert_eq!(match_score("cat", "CAT FACE", ""), Some(MATCH_WORD));
+        assert_eq!(match_score("cat", "SMILING CAT FACE WITH OPEN MOUTH", ":smiley_cat:"), Some(MATCH_WORD));
+        assert_eq!(match_score("cat", "GRINNING FACE", ":smiley_cat:"), Some(MATCH_WORD));
+        assert_eq!(match_score("cat", "CATALAN SIGN", ""), Some(MATCH_PREFIX));
+        assert_eq!(match_score("cat", "DUPLICATE SIGN", ""), Some(MATCH_SUBSTRING));
+        assert_eq!(match_score("cat", "LOCATION SIGN", ""), Some(MATCH_SUBSTRING));
+        assert_eq!(match_score("cat", "DOG FACE", ":dog:"), None);
+        assert_eq!(match_score("thinking face", "THINKING FACE", ""), Some(MATCH_WORD));
+        assert_eq!(match_score("thinking cat", "THINKING FACE", ""), None);
+        assert_eq!(match_score(":+1:", "THUMBS UP SIGN", ":thumbsup: :+1:"), Some(MATCH_WORD));
     }
 
     #[test]

@@ -19,6 +19,9 @@ required, works system-wide.
 - **Views** — switch between `All` and `★ Favorites` with `Ctrl+1` / `Ctrl+2`.
   `Ctrl+D` saves whichever view is active as the one charmander opens to next
   time.
+- **Skin tones** — the list shows each emoji once; `Alt+Enter` lists its
+  tones, and a `skin_tone` setting makes plain `Enter` apply yours. See
+  [Skin tones](#skin-tones).
 - **Windows-style Alt codes** — hold `Alt` and type digits (number row or
   numpad, both work). Releasing `Alt` narrows the list to just the character
   the code resolves to; `Backspace` corrects a digit and `Enter` inserts.
@@ -69,6 +72,7 @@ Then press the hotkey anywhere, search, and hit `Enter`.
 | `Ctrl+F`          | Toggle favorite    |
 | Right-click       | Toggle favorite    |
 | `Alt`+digits      | Start an Alt code  |
+| `Alt+Enter`       | Pick a skin tone   |
 | `Ctrl+1` / `Ctrl+2` | Switch view (All / Favorites) |
 | `Ctrl+D`          | Set current view as default |
 | `Esc`             | Cancel             |
@@ -102,6 +106,24 @@ set this in `~/.config/charmander/settings.conf`:
 ```ini
 quick_alt = on
 ```
+
+## Skin tones
+
+The list shows each emoji once, in its plain form. `Alt+Enter` (or
+`Alt`+click) on one that has skin tones lists them; `Enter` inserts the
+highlighted tone, `Esc` returns to the search. Multi-person emoji such as
+the handshake list every tone pairing.
+
+To make plain `Enter` insert a tone of your choice, set it in
+`~/.config/charmander/settings.conf`:
+
+```ini
+skin_tone = medium
+```
+
+One of `light`, `medium-light`, `medium`, `medium-dark`, `dark`. For
+multi-person emoji the same tone is applied to everyone. Star a toned
+variant and it appears in the Favorites view as is.
 
 ## Theming
 
@@ -141,7 +163,7 @@ fill, `accent` is the selection/cursor color.
 | `~/.config/charmander/theme.conf` | Color/font overrides |
 | `~/.config/charmander/favorites.txt` | Starred entries, one per line as hex codepoints (`1F914`, `1F468 200D 1F9B0`) |
 | `~/.config/charmander/default_view.txt` | `all` or `favorites` |
-| `~/.config/charmander/settings.conf` | `quick_alt` |
+| `~/.config/charmander/settings.conf` | `quick_alt`, `skin_tone` |
 
 On Windows these live under `%APPDATA%\charmander\`; `$XDG_CONFIG_HOME` is
 respected where set.

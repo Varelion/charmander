@@ -3,7 +3,10 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+mod skin_tone;
 mod typer;
+
+use skin_tone::SkinTone;
 
 use eframe::egui;
 use egui::{Color32, FontData, FontDefinitions, FontFamily, Key, RichText};
@@ -741,6 +744,22 @@ fn load_quick_alt() -> bool {
     fs::read_to_string(settings_path()).map(|content| parse_quick_alt(&content)).unwrap_or(false)
 }
 
+// `skin_tone = medium` makes Enter insert that tone; unset or unknown
+// values keep the plain yellow base.
+fn parse_skin_tone(content: &str) -> Option<SkinTone> {
+    content
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .filter_map(|line| line.split_once('='))
+        .find(|(key, _)| key.trim() == "skin_tone")
+        .and_then(|(_, value)| SkinTone::from_setting(strip_value(value)))
+}
+
+fn load_skin_tone() -> Option<SkinTone> {
+    fs::read_to_string(settings_path()).ok().and_then(|content| parse_skin_tone(&content))
+}
+
 // Leaves a commented template behind so the setting is discoverable
 // without reading the docs.
 fn write_settings_template() {
@@ -757,7 +776,12 @@ fn write_settings_template() {
          #\n\
          # quick_alt: insert an alt code the moment Alt is released, instead\n\
          # of narrowing the list and waiting for Enter.\n\
-         #quick_alt = on\n",
+         #quick_alt = on\n\
+         #\n\
+         # skin_tone: tone Enter applies to emoji that have one. Alt+Enter\n\
+         # still offers every tone. One of: light, medium-light, medium,\n\
+         # medium-dark, dark.\n\
+         #skin_tone = medium\n",
     )
     .ok();
 }
@@ -858,6 +882,10 @@ struct Picker {
     alt_active_prev: bool,
     alt_held_prev: bool,
     quick_alt: bool,
+    default_tone: Option<SkinTone>,
+    // Base emoji whose skin tones are being listed, replacing the search.
+    tone_base: Option<String>,
+    toned_bases: HashSet<String>,
     ever_focused: bool,
     theme: Theme,
 }
@@ -876,6 +904,9 @@ impl Picker {
             alt_active_prev: false,
             alt_held_prev: false,
             quick_alt: load_quick_alt(),
+            default_tone: load_skin_tone(),
+            tone_base: None,
+            toned_bases: skin_tone::toned_bases(CHARACTERS),
             ever_focused: false,
             theme,
         };
@@ -892,6 +923,10 @@ impl Picker {
             .iter()
             .filter(|(glyph, name)| {
                 if favorites_only && !favorites.contains(&codepoint_key(glyph)) {
+                    return false;
+                }
+                // Toned variants stay behind Alt+Enter, unless starred.
+                if !favorites_only && skin_tone::has_tone(glyph) {
                     return false;
                 }
                 query.is_empty() || name.to_lowercase().contains(&query)
@@ -915,6 +950,35 @@ impl Picker {
     fn choose(&mut self, glyph: &str, ctx: &egui::Context) {
         *self.chosen.lock().unwrap() = Some(glyph.to_string());
         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+    }
+
+    // Plain Enter: the configured tone when the emoji has it, else as listed.
+    fn choose_default(&mut self, glyph: &str, ctx: &egui::Context) {
+        let toned = self.default_tone.and_then(|tone| skin_tone::with_tone(glyph, tone, CHARACTERS));
+        self.choose(toned.unwrap_or(glyph), ctx);
+    }
+
+    // Alt+Enter: list the base and its tones in place of the search results.
+    // Emoji without tones insert right away, so the key never dead-ends.
+    fn open_tones(&mut self, glyph: &str, ctx: &egui::Context) {
+        let variants = skin_tone::variants_of(glyph, CHARACTERS);
+        if variants.is_empty() {
+            self.choose_default(glyph, ctx);
+            return;
+        }
+
+        let base = CHARACTERS.iter().find(|(g, _)| *g == glyph).map(|(_, n)| *n).unwrap_or("");
+        let mut results = vec![(glyph.to_string(), base)];
+        results.extend(variants.into_iter().map(|(g, n)| (g.to_string(), n)));
+        self.results = results;
+        self.selected = 0;
+        self.tone_base = Some(glyph.to_string());
+    }
+
+    fn close_tones(&mut self) {
+        self.tone_base = None;
+        self.focus_requested = true;
+        self.refresh_results();
     }
 
     // Alt-code entry. Holding Alt and typing a digit starts it; the digits
@@ -971,7 +1035,7 @@ impl Picker {
 
         // Entry just ended: hand focus back to the search box, which lost it
         // while the indicator stood in for it, and restore the full list.
-        if self.alt_active_prev && !active {
+        if self.alt_active_prev && !active && self.tone_base.is_none() {
             self.focus_requested = true;
             self.refresh_results();
         }
@@ -1023,6 +1087,8 @@ impl eframe::App for Picker {
         if ctx.input(|i| i.key_pressed(Key::Escape)) {
             if entering_alt_code {
                 self.cancel_alt_code();
+            } else if self.tone_base.is_some() {
+                self.close_tones();
             } else {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
@@ -1059,11 +1125,22 @@ impl eframe::App for Picker {
         if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(Key::D)) {
             save_default_view(self.favorites_only);
         }
-        if ctx.input(|i| i.key_pressed(Key::Enter)) {
+        // Alt alone (no digits yet) reads as alt-code entry, so Alt+Enter
+        // is claimed first.
+        let alt_enter = ctx.input(|i| i.modifiers.alt && i.key_pressed(Key::Enter));
+        if alt_enter && self.alt_buffer.is_empty() && self.tone_base.is_none() {
+            if let Some((glyph, _)) = self.results.get(self.selected).cloned() {
+                self.open_tones(&glyph, ctx);
+            }
+        } else if ctx.input(|i| i.key_pressed(Key::Enter)) {
             if entering_alt_code {
                 self.commit_alt_code(ctx);
             } else if let Some((glyph, _)) = self.results.get(self.selected).cloned() {
-                self.choose(&glyph, ctx);
+                if self.tone_base.is_some() {
+                    self.choose(&glyph, ctx);
+                } else {
+                    self.choose_default(&glyph, ctx);
+                }
             }
         }
 
@@ -1141,6 +1218,31 @@ impl eframe::App for Picker {
                         .small(),
                     );
                 }
+            } else if let Some(base) = self.tone_base.clone() {
+                // Replaces the search box like alt-code entry does: the list
+                // holds only the tones, and typing has nothing to narrow.
+                let tones = SkinTone::setting_names().join(", ");
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(
+                        RichText::new(format!("Skin tone for {base}")).color(theme.accent).monospace(),
+                    );
+                    ui.label(RichText::new("Enter inserts \u{00b7} Esc back").color(theme.dim).small())
+                        .on_hover_text(format!(
+                            "Enter on the plain list inserts the tone from settings.conf.\n\
+                             skin_tone = one of: {tones}"
+                        ));
+                });
+
+                if self.default_tone.is_none() {
+                    ui.label(
+                        RichText::new(
+                            "Tip: set skin_tone = medium in settings.conf to insert \
+                             that tone with plain Enter",
+                        )
+                        .color(theme.dim)
+                        .small(),
+                    );
+                }
             } else {
                 let search = ui.text_edit_singleline(&mut self.query);
                 if self.focus_requested {
@@ -1170,9 +1272,27 @@ impl eframe::App for Picker {
                         RichText::new(text).color(theme.fg)
                     };
 
-                    let response = ui.selectable_label(is_selected, rich);
-                    if response.clicked() {
+                    // Rows with skin tones carry the hint themselves, flush
+                    // right, so the legend stays the same for every list.
+                    let has_tones = self.tone_base.is_none() && self.toned_bases.contains(glyph);
+                    let response = ui
+                        .horizontal(|ui| {
+                            let response = ui.selectable_label(is_selected, rich);
+                            if has_tones {
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    key_badge(ui, &theme, "Alt+Enter", "skin tone");
+                                });
+                            }
+                            response
+                        })
+                        .inner;
+                    let alt_held = ctx.input(|i| i.modifiers.alt);
+                    if response.clicked() && alt_held && self.tone_base.is_none() {
+                        self.open_tones(glyph, ctx);
+                    } else if response.clicked() && self.tone_base.is_some() {
                         self.choose(glyph, ctx);
+                    } else if response.clicked() {
+                        self.choose_default(glyph, ctx);
                     }
                     if response.secondary_clicked() {
                         self.toggle_favorite(glyph);
@@ -1274,6 +1394,14 @@ mod tests {
         assert_eq!(alt_code_to_char("65"), Some('A'), "the ASCII range is unchanged");
         // Same number, different code page.
         assert_eq!(alt_code_to_char("150"), Some('û'));
+    }
+
+    #[test]
+    fn reads_skin_tone_setting() {
+        assert_eq!(parse_skin_tone("skin_tone = medium-dark"), Some(SkinTone::MediumDark));
+        assert_eq!(parse_skin_tone("quick_alt = on\nskin_tone=\"light\"\n"), Some(SkinTone::Light));
+        assert_eq!(parse_skin_tone("#skin_tone = medium"), None, "the template default stays off");
+        assert_eq!(parse_skin_tone("skin_tone = tan"), None);
     }
 
     #[test]

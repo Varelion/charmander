@@ -15,6 +15,25 @@ include!(concat!(env!("OUT_DIR"), "/characters.rs"));
 const FALLBACK_FONT_FAMILIES: &[&str] =
     &["Symbola", "Noto Sans Symbols2", "Noto Sans Symbols", "Noto Color Emoji"];
 const MAX_RESULTS: usize = 200;
+// Favorites are stored as the hex codepoints of an entry, space separated
+// for sequences: "1F914" or "1F468 200D 1F9B0".
+const CODEPOINT_SEPARATOR: &str = " ";
+
+fn codepoint_key(glyph: &str) -> String {
+    glyph
+        .chars()
+        .map(|c| format!("{:04X}", c as u32))
+        .collect::<Vec<_>>()
+        .join(CODEPOINT_SEPARATOR)
+}
+
+fn codepoint_label(glyph: &str) -> String {
+    glyph
+        .chars()
+        .map(|c| format!("U+{:04X}", c as u32))
+        .collect::<Vec<_>>()
+        .join(CODEPOINT_SEPARATOR)
+}
 
 // Look of the picker. Loaded once at startup, in priority order:
 //   1. ~/.config/charmander/theme.conf   (user override, always wins)
@@ -571,7 +590,7 @@ fn main() -> eframe::Result<()> {
         return Ok(());
     }
 
-    let chosen: Arc<Mutex<Option<char>>> = Arc::new(Mutex::new(None));
+    let chosen: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let chosen_for_app = chosen.clone();
     let theme = load_theme();
     write_settings_template();
@@ -598,8 +617,8 @@ fn main() -> eframe::Result<()> {
         }),
     )?;
 
-    if let Some(ch) = *chosen.lock().unwrap() {
-        typer::type_str(&ch.to_string());
+    if let Some(glyph) = chosen.lock().unwrap().as_deref() {
+        typer::type_str(glyph);
     }
 
     Ok(())
@@ -665,22 +684,23 @@ fn favorites_path() -> PathBuf {
     config_dir().join("favorites.txt")
 }
 
-fn load_favorites() -> HashSet<u32> {
+fn load_favorites() -> HashSet<String> {
     let Ok(content) = fs::read_to_string(favorites_path()) else {
         return HashSet::new();
     };
     content
         .lines()
-        .filter_map(|line| u32::from_str_radix(line.trim(), 16).ok())
+        .map(|line| line.trim().to_uppercase())
+        .filter(|line| !line.is_empty())
         .collect()
 }
 
-fn save_favorites(favorites: &HashSet<u32>) {
+fn save_favorites(favorites: &HashSet<String>) {
     let path = favorites_path();
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).ok();
     }
-    let body: String = favorites.iter().map(|cp| format!("{cp:04X}\n")).collect();
+    let body: String = favorites.iter().map(|key| format!("{key}\n")).collect();
     fs::write(path, body).ok();
 }
 
@@ -828,12 +848,12 @@ fn digit_key(key: Key) -> Option<char> {
 
 struct Picker {
     query: String,
-    favorites: HashSet<u32>,
+    favorites: HashSet<String>,
     favorites_only: bool,
     selected: usize,
-    results: Vec<(u32, &'static str)>,
+    results: Vec<(String, &'static str)>,
     focus_requested: bool,
-    chosen: Arc<Mutex<Option<char>>>,
+    chosen: Arc<Mutex<Option<String>>>,
     alt_buffer: String,
     alt_active_prev: bool,
     alt_held_prev: bool,
@@ -843,7 +863,7 @@ struct Picker {
 }
 
 impl Picker {
-    fn new(chosen: Arc<Mutex<Option<char>>>, theme: Theme) -> Self {
+    fn new(chosen: Arc<Mutex<Option<String>>>, theme: Theme) -> Self {
         let mut picker = Self {
             query: String::new(),
             favorites: load_favorites(),
@@ -868,33 +888,32 @@ impl Picker {
         let favorites_only = self.favorites_only;
         let favorites = &self.favorites;
 
-        let results: Vec<(u32, &'static str)> = CHARACTERS
+        let results: Vec<(String, &'static str)> = CHARACTERS
             .iter()
-            .filter(|(codepoint, name)| {
-                if favorites_only && !favorites.contains(codepoint) {
+            .filter(|(glyph, name)| {
+                if favorites_only && !favorites.contains(&codepoint_key(glyph)) {
                     return false;
                 }
                 query.is_empty() || name.to_lowercase().contains(&query)
             })
             .take(MAX_RESULTS)
-            .map(|(cp, name)| (*cp, *name))
+            .map(|(glyph, name)| (glyph.to_string(), *name))
             .collect();
 
         self.selected = self.selected.min(results.len().saturating_sub(1));
         self.results = results;
     }
 
-    fn toggle_favorite(&mut self, codepoint: u32) {
-        if !self.favorites.remove(&codepoint) {
-            self.favorites.insert(codepoint);
+    fn toggle_favorite(&mut self, glyph: &str) {
+        let key = codepoint_key(glyph);
+        if !self.favorites.remove(&key) {
+            self.favorites.insert(key);
         }
         save_favorites(&self.favorites);
     }
 
-    fn choose(&mut self, codepoint: u32, ctx: &egui::Context) {
-        if let Some(glyph) = char::from_u32(codepoint) {
-            *self.chosen.lock().unwrap() = Some(glyph);
-        }
+    fn choose(&mut self, glyph: &str, ctx: &egui::Context) {
+        *self.chosen.lock().unwrap() = Some(glyph.to_string());
         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
     }
 
@@ -967,13 +986,13 @@ impl Picker {
         let resolved = alt_code_to_char(&self.alt_buffer);
         self.results = resolved
             .map(|ch| {
-                let codepoint = ch as u32;
+                let glyph = ch.to_string();
                 let name = CHARACTERS
                     .iter()
-                    .find(|(candidate, _)| *candidate == codepoint)
+                    .find(|(candidate, _)| *candidate == glyph)
                     .map(|(_, name)| *name)
                     .unwrap_or("UNNAMED CHARACTER");
-                vec![(codepoint, name)]
+                vec![(glyph, name)]
             })
             .unwrap_or_default();
         self.selected = 0;
@@ -985,7 +1004,7 @@ impl Picker {
         let Some(ch) = alt_code_to_char(&self.alt_buffer) else {
             return;
         };
-        *self.chosen.lock().unwrap() = Some(ch);
+        *self.chosen.lock().unwrap() = Some(ch.to_string());
         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
     }
 
@@ -1025,9 +1044,9 @@ impl eframe::App for Picker {
             self.selected = self.selected.saturating_sub(1);
         }
         if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(Key::F))
-            && let Some((codepoint, _)) = self.results.get(self.selected).copied()
+            && let Some((glyph, _)) = self.results.get(self.selected).cloned()
         {
-            self.toggle_favorite(codepoint);
+            self.toggle_favorite(&glyph);
         }
         if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(Key::Num1)) {
             self.favorites_only = false;
@@ -1043,8 +1062,8 @@ impl eframe::App for Picker {
         if ctx.input(|i| i.key_pressed(Key::Enter)) {
             if entering_alt_code {
                 self.commit_alt_code(ctx);
-            } else if let Some((codepoint, _)) = self.results.get(self.selected).copied() {
-                self.choose(codepoint, ctx);
+            } else if let Some((glyph, _)) = self.results.get(self.selected).cloned() {
+                self.choose(&glyph, ctx);
             }
         }
 
@@ -1137,12 +1156,11 @@ impl eframe::App for Picker {
             ui.separator();
 
             egui::ScrollArea::vertical().show(ui, |ui| {
-                for (idx, (codepoint, name)) in self.results.clone().iter().enumerate() {
-                    let is_favorite = self.favorites.contains(codepoint);
+                for (idx, (glyph, name)) in self.results.clone().iter().enumerate() {
+                    let is_favorite = self.favorites.contains(&codepoint_key(glyph));
                     let is_selected = idx == self.selected;
-                    let glyph = char::from_u32(*codepoint).unwrap_or(' ');
                     let star = if is_favorite { "★" } else { "☆" };
-                    let text = format!("{glyph}  {name}  (U+{codepoint:04X})  {star}");
+                    let text = format!("{glyph}  {name}  ({})  {star}", codepoint_label(glyph));
 
                     let rich = if is_selected {
                         RichText::new(text).color(Color32::BLACK).background_color(theme.accent)
@@ -1154,10 +1172,10 @@ impl eframe::App for Picker {
 
                     let response = ui.selectable_label(is_selected, rich);
                     if response.clicked() {
-                        self.choose(*codepoint, ctx);
+                        self.choose(glyph, ctx);
                     }
                     if response.secondary_clicked() {
-                        self.toggle_favorite(*codepoint);
+                        self.toggle_favorite(glyph);
                     }
                 }
             });

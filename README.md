@@ -11,7 +11,9 @@ required, works system-wide.
 
 ## Features
 
-- **Search** — live substring search over every named Unicode character.
+- **Search** — live substring search over every named Unicode character
+  and emoji, including multi-codepoint ones: flags, families, keycaps,
+  skin tones.
 - **Favorites** — star any character (`Ctrl+F` or right-click). Favorited
   entries show `★`, everything else shows `☆`.
 - **Views** — switch between `All` and `★ Favorites` with `Ctrl+1` / `Ctrl+2`.
@@ -137,7 +139,7 @@ fill, `accent` is the selection/cursor color.
 | Path | Purpose |
 |------|---------|
 | `~/.config/charmander/theme.conf` | Color/font overrides |
-| `~/.config/charmander/favorites.txt` | Starred codepoints, one hex per line |
+| `~/.config/charmander/favorites.txt` | Starred entries, one per line as hex codepoints (`1F914`, `1F468 200D 1F9B0`) |
 | `~/.config/charmander/default_view.txt` | `all` or `favorites` |
 | `~/.config/charmander/settings.conf` | `quick_alt` |
 
@@ -147,7 +149,8 @@ respected where set.
 ## Data
 
 Character names come from the Unicode Character Database
-(`UnicodeData.txt`, Unicode, Inc.), used under the [Unicode License
+(`UnicodeData.txt`) and emoji sequences from `emoji-test.txt`, both
+Unicode, Inc., used under the [Unicode License
 Agreement](https://www.unicode.org/license.txt).
 
 ## License

@@ -607,6 +607,7 @@ dependencies = [
  "enigo",
  "image",
  "mslnk",
+ "x11rb",
 ]
 
 [[package]]

@@ -2,11 +2,11 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+
+mod typer;
 
 use eframe::egui;
 use egui::{Color32, FontData, FontDefinitions, FontFamily, Key, RichText};
-use enigo::{Enigo, Keyboard, Settings};
 
 include!(concat!(env!("OUT_DIR"), "/characters.rs"));
 
@@ -15,7 +15,6 @@ include!(concat!(env!("OUT_DIR"), "/characters.rs"));
 const FALLBACK_FONT_FAMILIES: &[&str] =
     &["Symbola", "Noto Sans Symbols2", "Noto Sans Symbols", "Noto Color Emoji"];
 const MAX_RESULTS: usize = 200;
-const TYPE_DELAY: Duration = Duration::from_millis(150);
 
 // Look of the picker. Loaded once at startup, in priority order:
 //   1. ~/.config/charmander/theme.conf   (user override, always wins)
@@ -600,7 +599,7 @@ fn main() -> eframe::Result<()> {
     )?;
 
     if let Some(ch) = *chosen.lock().unwrap() {
-        type_char(ch);
+        typer::type_str(&ch.to_string());
     }
 
     Ok(())
@@ -825,13 +824,6 @@ fn digit_key(key: Key) -> Option<char> {
         Key::Num9 => Some('9'),
         _ => None,
     }
-}
-
-fn type_char(ch: char) {
-    std::thread::sleep(TYPE_DELAY);
-    let mut enigo = Enigo::new(&Settings::default()).expect("init enigo");
-    let mut buf = [0u8; 4];
-    enigo.text(ch.encode_utf8(&mut buf)).expect("type selected character");
 }
 
 struct Picker {

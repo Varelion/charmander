@@ -66,6 +66,10 @@ Elsewhere (KDE, macOS, anything else) `--setup` prints the command to bind
 manually, since those don't have a keybinding API that's safe to script
 blindly.
 
+Until a hotkey is bound, the picker shows a `Ctrl+Shift+U` badge.
+Clicking it, or pressing the combo, runs the same setup and the badge
+disappears.
+
 Then press the hotkey anywhere, search, and hit `Enter`.
 
 | Key               | Action             |

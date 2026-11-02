@@ -483,9 +483,20 @@ fn print_manual_instructions(exe: &str) {
 // platform/desktop. Where there's no scriptable keybinding API (KDE's is
 // version-fragile, macOS has none at all), we print instructions instead of
 // risking a broken config.
-fn run_setup() {
+fn run_setup() -> bool {
     let exe = std::env::current_exe().expect("resolve own executable path");
     let exe = exe.to_string_lossy().into_owned();
+
+    let bound = install_hotkey(&exe);
+    if bound {
+        mark_hotkey_set();
+    }
+    bound
+}
+
+// Returns whether a hotkey was actually bound.
+fn install_hotkey(exe: &str) -> bool {
+    let exe = exe.to_string();
 
     #[cfg(target_os = "windows")]
     return setup_windows(&exe);
@@ -495,16 +506,16 @@ fn run_setup() {
         println!("Automatic setup isn't available on macOS.");
         println!("Add it under System Settings > Keyboard > Keyboard Shortcuts > App Shortcuts:");
         println!("  {exe}");
-        return;
+        return false;
     }
 
     #[cfg(target_os = "linux")]
     {
         let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default().to_lowercase();
         if desktop.contains("xfce") {
-            setup_xfce(&exe);
+            return setup_xfce(&exe);
         } else if desktop.contains("gnome") {
-            setup_gnome(&exe);
+            return setup_gnome(&exe);
         } else if desktop.contains("kde") {
             println!("Automatic setup isn't supported on KDE yet (its shortcut config");
             println!("differs too much across Plasma versions to script safely).");
@@ -514,18 +525,19 @@ fn run_setup() {
             println!("Automatic setup isn't supported on this desktop environment.");
             print_manual_instructions(&exe);
         }
-        return;
+        return false;
     }
 
     #[allow(unreachable_code)]
     {
         println!("Automatic setup isn't supported on this platform.");
         print_manual_instructions(&exe);
+        false
     }
 }
 
 #[cfg(target_os = "linux")]
-fn setup_xfce(exe: &str) {
+fn setup_xfce(exe: &str) -> bool {
     let property_exists = std::process::Command::new("xfconf-query")
         .args(["-c", "xfce4-keyboard-shortcuts", "-p", XFCE_SHORTCUT_PROPERTY])
         .output()
@@ -541,10 +553,14 @@ fn setup_xfce(exe: &str) {
     }
 
     match cmd.status() {
-        Ok(status) if status.success() => println!("Bound Ctrl+Shift+U to charmander."),
+        Ok(status) if status.success() => {
+            println!("Bound Ctrl+Shift+U to charmander.");
+            true
+        }
         _ => {
             println!("Failed to set the XFCE shortcut.");
             print_manual_instructions(exe);
+            false
         }
     }
 }
@@ -567,7 +583,7 @@ fn gsettings_set(schema: &str, key: &str, value: &str) -> bool {
 // GNOME custom keybindings live in a gsettings array of dconf paths; each
 // path then holds its own name/command/binding under a child schema.
 #[cfg(target_os = "linux")]
-fn setup_gnome(exe: &str) {
+fn setup_gnome(exe: &str) -> bool {
     const LIST_SCHEMA: &str = "org.gnome.settings-daemon.plugins.media-keys";
     const LIST_KEY: &str = "custom-keybindings";
 
@@ -602,24 +618,27 @@ fn setup_gnome(exe: &str) {
         println!("Failed to set the GNOME shortcut (is gsettings installed?).");
         print_manual_instructions(exe);
     }
+    ok
 }
 
 // Windows hotkeys are set on a Start Menu shortcut's embedded "hotkey" field;
 // Windows registers it globally as long as the .lnk lives in the Start Menu.
 #[cfg(target_os = "windows")]
-fn setup_windows(exe: &str) {
+fn setup_windows(exe: &str) -> bool {
     use mslnk::{HotkeyKey, HotkeyModifiers, ShellLink};
 
     let Ok(appdata) = std::env::var("APPDATA") else {
         println!("Couldn't resolve %APPDATA%.");
-        return print_manual_instructions(exe);
+        print_manual_instructions(exe);
+        return false;
     };
     let shortcut_path =
         std::path::Path::new(&appdata).join("Microsoft/Windows/Start Menu/Programs/charmander.lnk");
 
     let Ok(mut link) = ShellLink::new(exe) else {
         println!("Failed to build the shortcut.");
-        return print_manual_instructions(exe);
+        print_manual_instructions(exe);
+        return false;
     };
 
     let hotkey = link.header_mut().hotkey_mut();
@@ -627,10 +646,14 @@ fn setup_windows(exe: &str) {
     hotkey.set_modifiers(HotkeyModifiers::HOTKEYF_CONTROL | HotkeyModifiers::HOTKEYF_SHIFT);
 
     match link.create_lnk(&shortcut_path) {
-        Ok(()) => println!("Bound Ctrl+Shift+U to charmander."),
+        Ok(()) => {
+            println!("Bound Ctrl+Shift+U to charmander.");
+            true
+        }
         Err(_) => {
             println!("Failed to write the Start Menu shortcut.");
             print_manual_instructions(exe);
+            false
         }
     }
 }
@@ -774,6 +797,24 @@ fn save_default_view(favorites_only: bool) {
     fs::write(path, value).ok();
 }
 
+// Empty file left behind once the hotkey is bound, so the picker stops
+// offering to bind it.
+fn hotkey_marker_path() -> PathBuf {
+    config_dir().join("hotkey_set")
+}
+
+fn hotkey_is_set() -> bool {
+    hotkey_marker_path().exists()
+}
+
+fn mark_hotkey_set() {
+    let path = hotkey_marker_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).ok();
+    }
+    fs::write(path, "").ok();
+}
+
 fn settings_path() -> PathBuf {
     config_dir().join("settings.conf")
 }
@@ -845,6 +886,27 @@ fn key_badge(ui: &mut egui::Ui, theme: &Theme, key: &str, action: &str) {
             ui.label(RichText::new(key).color(theme.accent).strong().monospace());
         });
     ui.label(RichText::new(action).color(theme.fg).small());
+}
+
+// Same look as `key_badge`, but the keycap is clickable.
+fn key_badge_button(ui: &mut egui::Ui, theme: &Theme, key: &str, action: &str) -> bool {
+    let mut clicked = false;
+    ui.horizontal(|ui| {
+        let response = egui::Frame::new()
+            .fill(theme.dim)
+            .stroke(egui::Stroke::new(1.0, theme.accent))
+            .corner_radius(4)
+            .inner_margin(egui::Margin::symmetric(6, 2))
+            .show(ui, |ui| {
+                ui.label(RichText::new(key).color(theme.accent).strong().monospace());
+            })
+            .response
+            .interact(egui::Sense::click())
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
+        clicked = response.clicked();
+        ui.label(RichText::new(action).color(theme.fg).small());
+    });
+    clicked
 }
 
 // CP437 (DOS/OEM) codes 1-31. Alt codes render this range as graphics
@@ -937,6 +999,7 @@ struct Picker {
     // Shift+Enter: the entry to insert N times and the digits of N so far.
     repeat: Option<(String, String)>,
     ever_focused: bool,
+    hotkey_set: bool,
     theme: Theme,
 }
 
@@ -959,6 +1022,7 @@ impl Picker {
             toned_bases: skin_tone::toned_bases(CHARACTERS),
             repeat: None,
             ever_focused: false,
+            hotkey_set: hotkey_is_set(),
             theme,
         };
         picker.refresh_results();
@@ -1262,6 +1326,16 @@ impl eframe::App for Picker {
         let theme = self.theme.clone();
         egui::Panel::bottom("legend").show(ui, |ui| {
             ui.add_space(4.0);
+            // Offered until a hotkey is bound; clicking runs `--setup`.
+            if !self.hotkey_set {
+                let pressed = ctx.input(|i| {
+                    i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(Key::U)
+                });
+                let clicked = key_badge_button(ui, &theme, "Ctrl+Shift+U", "set as hotkey");
+                if pressed || clicked {
+                    self.hotkey_set = run_setup();
+                }
+            }
             ui.horizontal_wrapped(|ui| {
                 key_badge(ui, &theme, "\u{2191}\u{2193}", "navigate");
                 key_badge(ui, &theme, "Enter", "insert");
